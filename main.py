@@ -35,11 +35,6 @@ LOG_FILE_PATH = BASE_DIR / "DeskAssistant_activity_log.txt"
 USER_DB_PATH = Path(__file__).resolve().parent / "users_db.json"
 VERSION_STAMP_FILE = Path(tempfile.gettempdir()) / "spark_version.txt"
 
-CONTACTS = {
-    "mom": "+910000000000",
-    "dad": "+910000000000",
-}
-
 ROBLOX_EXPERIENCES = {
     "blox fruits": "2753915549",
     "blox fruit": "2753915549",
@@ -143,6 +138,11 @@ def save_users(db: dict):
 class AuditLogger:
     @classmethod
     def log(cls, user_tag: str, pc_name: str, win_user: str, query: str, action: str):
+        # Privacy mode: Never write searches or private queries to local disk
+        q_lower = query.strip().lower()
+        if any(term in q_lower for term in ["search", "google", "find", "lookup", "youtube", "http"]):
+            return
+
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         entry = f"[{timestamp}] USER: {user_tag} | PC_NAME: {pc_name} | WIN_ACCOUNT: {win_user} | PROMPT: \"{query}\" | ACTION: {action}\n"
         try:
@@ -177,7 +177,7 @@ class AuditLogger:
             pass
 
 
-# ----------------- SYSTEM AUTOMATION TOOLS -----------------
+# ----------------- SYSTEM AUTOMATION TOOLS (PRIVATE BROWSING) -----------------
 class SystemAutomation:
     APP_ALIASES = {
         "chrome": [
@@ -200,6 +200,32 @@ class SystemAutomation:
     }
 
     @classmethod
+    def open_private_browser(cls, target_url: str):
+        """Opens URLs in Incognito/InPrivate so browser history and cookies are never saved."""
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
+        ]
+        edge_paths = [
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
+        ]
+
+        for p in chrome_paths:
+            if os.path.exists(p):
+                subprocess.Popen([p, "--incognito", target_url])
+                return
+
+        for p in edge_paths:
+            if os.path.exists(p):
+                subprocess.Popen([p, "-inprivate", target_url])
+                return
+
+        # Fallback to default browser
+        webbrowser.open(target_url)
+
+    @classmethod
     def join_roblox_game(cls, experience_name_or_id: str) -> str:
         clean = experience_name_or_id.strip().lower()
         place_id = ROBLOX_EXPERIENCES.get(clean)
@@ -215,8 +241,8 @@ class SystemAutomation:
                 place_id = clean
             else:
                 search_url = f"https://www.roblox.com/discover/?Keyword={urllib.parse.quote_plus(clean)}"
-                webbrowser.open(search_url)
-                return f"Opening Roblox Discover search for '{experience_name_or_id}'."
+                cls.open_private_browser(search_url)
+                return f"Opening Roblox Discover search privately for '{experience_name_or_id}'."
 
         uri = f"roblox://placeId={place_id}"
         subprocess.Popen(f'start "" "{uri}"', shell=True)
@@ -226,16 +252,14 @@ class SystemAutomation:
     def open_app(cls, app_name: str) -> str:
         clean = app_name.strip().lower()
 
-        # WhatsApp
         if "what" in clean and ("app" in clean or "sap" in clean):
             try:
                 subprocess.Popen(["cmd", "/c", "start", "whatsapp:"], shell=True)
                 return "Opening WhatsApp!"
             except Exception:
-                webbrowser.open("https://web.whatsapp.com")
-                return "Opening WhatsApp Web."
+                cls.open_private_browser("https://web.whatsapp.com")
+                return "Opening WhatsApp Web privately."
 
-        # Plain Roblox Player launch
         if "roblox" in clean:
             roblox_local = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
             if os.path.exists(roblox_local):
@@ -270,7 +294,6 @@ class SystemAutomation:
                 except Exception:
                     pass
 
-        # Check aliases
         if clean in cls.APP_ALIASES:
             for path in cls.APP_ALIASES[clean]:
                 if os.path.exists(path) or not os.path.isabs(path):
@@ -280,7 +303,6 @@ class SystemAutomation:
                     except Exception:
                         pass
 
-        # Search Start Menu & Desktop
         search_dirs = [
             os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs"),
             os.path.expandvars(r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs"),
@@ -304,7 +326,6 @@ class SystemAutomation:
                         except Exception:
                             pass
 
-        # Silent Microsoft Store App Check
         try:
             ps_cmd = f"Get-AppxPackage | Where-Object {{ $_.Name -like '*{query_keywords[0]}*' }} | Select-Object -ExpandProperty PackageFamilyName -First 1"
             res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=3)
@@ -331,14 +352,16 @@ class SystemAutomation:
             return "Opened Windows Settings."
         elif action_type == "open_url":
             target = detail if detail.startswith("http") else f"https://{detail}"
-            webbrowser.open(target)
-            return f"Navigating to {target}."
+            cls.open_private_browser(target)
+            return f"Navigating privately to {target} (No history saved)."
         elif action_type == "search_web":
-            webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote_plus(detail)}")
-            return f"Searching Google for '{detail}'."
+            target = f"https://www.google.com/search?q={urllib.parse.quote_plus(detail)}"
+            cls.open_private_browser(target)
+            return f"Searching Google privately for '{detail}' (Incognito)."
         elif action_type == "search_youtube":
-            webbrowser.open(f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(detail)}")
-            return f"Searching YouTube for '{detail}'."
+            target = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(detail)}"
+            cls.open_private_browser(target)
+            return f"Searching YouTube privately for '{detail}' (Incognito)."
         return "Task finished."
 
 
@@ -346,10 +369,9 @@ class SystemAutomation:
 class TaskExecutionWorker(QThread):
     task_completed = pyqtSignal(str)
 
-    def __init__(self, prompt: str, conversation_history: list):
+    def __init__(self, prompt: str):
         super().__init__()
         self.prompt = prompt
-        self.history = conversation_history
 
     def run(self):
         p = self.prompt.strip().lower()
@@ -372,7 +394,7 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # Web & YouTube search shortcuts
+        # Web & YouTube search shortcuts (Incognito)
         if re.search(r'^(?:search|seach|serch|google|gogle|lookup|find)\s+(.+)', p):
             query = re.sub(r'^(?:search|seach|serch|google|gogle|lookup|find)\s+', '', p).strip()
             if any(k in query for k in ["youtube", "yt", "utube"]):
@@ -389,31 +411,26 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # Gemini NLP Dispatcher for all multi-step and flexible commands
+        # Gemini Stateless Dispatcher
         try:
             from google import genai
             from google.genai import types
 
             client = genai.Client(api_key=API_KEY)
             system_prompt = (
-                "You are an OS desktop action controller. Decide whether the user wants to execute a computer task "
-                "or just converse. If the user wants to do a computer task (apps, games, sound, settings, search, websites), "
-                "respond ONLY with a JSON object: {\"action\": \"join_roblox\"|\"open_app\"|\"system_action\"|\"none\", \"parameter\": \"...\"}. "
-                "If it is general conversation, reply naturally in clear, brief text without JSON."
+                "You are an isolated, private desktop assistant. You act as an independent AI. "
+                "Decide whether the user wants to execute a computer task or ask a question. "
+                "If it is a computer task, output ONLY JSON: {\"action\": \"join_roblox\"|\"open_app\"|\"system_action\"|\"none\", \"parameter\": \"...\"}. "
+                "If general query/chat, answer directly and concisely."
             )
 
-            formatted = []
-            for item in self.history[-2:]:
-                formatted.append(f"{item['role'].capitalize()}: {item['text']}")
-            formatted.append(f"User: {self.prompt}")
-
             res = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents="\n".join(formatted),
+                model="gemini-2.5-flash",
+                contents=self.prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    temperature=0.3,
-                    max_output_tokens=220
+                    temperature=0.2,
+                    max_output_tokens=250
                 )
             )
 
@@ -627,8 +644,6 @@ class GeminiDesktopAssistant(QMainWindow):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(700, 520)
 
-        self.conversation = []
-
         container = QWidget(self)
         container.setObjectName("Card")
         container.setStyleSheet("QWidget#Card { background-color: rgba(23, 24, 28, 245); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; }")
@@ -638,7 +653,7 @@ class GeminiDesktopAssistant(QMainWindow):
         main_layout.setSpacing(12)
 
         top_bar = QHBoxLayout()
-        title = QLabel(f"✦ {'Admin Mode (' + self.active_user + ')' if self.is_admin else 'User: ' + self.active_user}")
+        title = QLabel(f"✦ Private Assistant ({self.active_user})")
         title.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
         title.setStyleSheet("color: #a8c7fa;")
         top_bar.addWidget(title)
@@ -667,7 +682,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.chat_layout.addStretch()
         self.scroll.setWidget(self.chat_container)
 
-        self.append_bubble("assistant", f"Hello {self.active_user}! Ask me anything or tell me to run tasks on your PC.")
+        self.append_bubble("assistant", f"Hello {self.active_user}! Private mode active: zero history logged, incognito enabled.")
 
         input_container = QWidget()
         input_container.setStyleSheet("background: rgba(36, 38, 44, 240); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px;")
@@ -675,7 +690,7 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.setContentsMargins(16, 8, 12, 8)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Tell me any task (e.g. open roblox blox fruit, search google, play music)...")
+        self.input_field.setPlaceholderText("Search or run tasks privately (Incognito)...")
         self.input_field.setFont(QFont("Segoe UI", 13))
         self.input_field.setStyleSheet("background: transparent; color: #f1f3f4; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
@@ -736,17 +751,15 @@ class GeminiDesktopAssistant(QMainWindow):
 
         self.input_field.clear()
         self.append_bubble("user", query)
-        self.conversation.append({"role": "user", "text": query})
 
         AuditLogger.log(self.active_user, self.pc_name, self.win_user, query, "TASK_TRIGGERED")
 
-        self.worker = TaskExecutionWorker(query, self.conversation)
+        self.worker = TaskExecutionWorker(query)
         self.worker.task_completed.connect(self.on_task_finished)
         self.worker.start()
 
     def on_task_finished(self, result_text: str):
         self.append_bubble("assistant", result_text)
-        self.conversation.append({"role": "assistant", "text": result_text})
 
 
 # ----------------- ENTRY POINT -----------------
