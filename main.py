@@ -4,9 +4,11 @@ import re
 import time
 import json
 import glob
+import random
 import hashlib
 import datetime
 import tempfile
+import threading
 import urllib.parse
 import urllib.request
 import subprocess
@@ -48,28 +50,25 @@ ROBLOX_EXPERIENCES = {
     "doors": "6516141723",
 }
 
-# ----------------- CONTINUOUS ZERO-TOUCH AUTO-UPDATER -----------------
+# ----------------- CONTINUOUS AUTO-UPDATER -----------------
 class AutoUpdater(QThread):
     def run(self):
         time.sleep(3)
         try:
             api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/latest"
-            req = urllib.request.Request(api_url, headers={"User-Agent": "SparkAssistant-ContinuousUpdater"})
+            req = urllib.request.Request(api_url, headers={"User-Agent": "SparkAssistant-Updater"})
             with urllib.request.urlopen(req, timeout=5) as response:
                 data = json.loads(response.read().decode())
-                
                 for asset in data.get("assets", []):
                     if asset.get("name") == "SparkAssistant.exe":
                         remote_stamp = asset.get("updated_at")
                         download_url = asset.get("browser_download_url")
-
                         local_stamp = ""
                         if VERSION_STAMP_FILE.exists():
                             try:
                                 local_stamp = VERSION_STAMP_FILE.read_text(encoding="utf-8").strip()
                             except Exception:
                                 pass
-
                         if remote_stamp and remote_stamp != local_stamp:
                             self.silent_replace_and_restart(download_url, remote_stamp)
                             return
@@ -81,28 +80,24 @@ class AutoUpdater(QThread):
             temp_dir = tempfile.gettempdir()
             new_exe = os.path.join(temp_dir, "SparkAssistant_update.exe")
             current_exe = sys.executable
-
             urllib.request.urlretrieve(download_url, new_exe)
             VERSION_STAMP_FILE.write_text(new_stamp, encoding="utf-8")
 
             bat_path = os.path.join(temp_dir, "silent_swap.bat")
-            bat_content = f"""@echo off
+            with open(bat_path, "w") as f:
+                f.write(f"""@echo off
 timeout /t 1 /nobreak > nul
 move /y "{new_exe}" "{current_exe}"
 start "" "{current_exe}"
 del "%~f0"
-"""
-            with open(bat_path, "w") as f:
-                f.write(bat_content)
-
+""")
             flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             subprocess.Popen([bat_path], shell=True, creationflags=flags)
             os._exit(0)
         except Exception:
             pass
 
-
-# ----------------- DB & LOGGING -----------------
+# ----------------- DB & AUDIT LOGGING -----------------
 def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
@@ -138,7 +133,6 @@ def save_users(db: dict):
 class AuditLogger:
     @classmethod
     def log(cls, user_tag: str, pc_name: str, win_user: str, query: str, action: str):
-        # Privacy mode: Never write searches or private queries to local disk
         q_lower = query.strip().lower()
         if any(term in q_lower for term in ["search", "google", "find", "lookup", "youtube", "http"]):
             return
@@ -177,31 +171,79 @@ class AuditLogger:
             pass
 
 
-# ----------------- SYSTEM AUTOMATION TOOLS (PRIVATE BROWSING) -----------------
+# ----------------- SAFE GAME MACRO CONTROLLER -----------------
+class GameMacroController:
+    """Simulates natural user inputs outside the game process to avoid Hyperion/anti-cheat detection."""
+    _active = False
+    _thread = None
+
+    @classmethod
+    def start_anti_afk(cls, mode: str = "farm") -> str:
+        if cls._active:
+            return "Macro/Anti-AFK is already active. Say 'stop macro' to cancel."
+
+        cls._active = True
+
+        def loop():
+            # Delay to give user time to click into the Roblox window
+            time.sleep(3)
+            while cls._active:
+                try:
+                    # Windows API-based safe simulation with randomized intervals
+                    # Random small jump (Space)
+                    subprocess.run(["powershell", "-NoProfile", "-Command", "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys(' ' )"], capture_output=True)
+                    time.sleep(random.uniform(0.3, 0.7))
+
+                    if mode == "farm":
+                        # Simulate combat key (e.g. click/attack key 'z' or click)
+                        subprocess.run(["powershell", "-NoProfile", "-Command", "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('z')"], capture_output=True)
+                    
+                    # Sleep with jitter so no fixed bot cadence is detectable
+                    sleep_time = random.uniform(4.0, 9.0)
+                    time.sleep(sleep_time)
+                except Exception:
+                    break
+
+        cls._thread = threading.Thread(target=loop, daemon=True)
+        cls._thread.start()
+        return "Safe Anti-AFK & Grinding active! Switch to your Roblox window now. Say 'stop macro' whenever you want to pause it."
+
+    @classmethod
+    def stop_anti_afk(cls) -> str:
+        if not cls._active:
+            return "No macro is currently running."
+        cls._active = False
+        return "Macro halted. Your controls are fully released."
+
+
+# ----------------- SYSTEM AUTOMATION TOOLS & POWERPOINT GENERATOR -----------------
 class SystemAutomation:
     APP_ALIASES = {
-        "chrome": [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
-        ],
-        "edge": [
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"
-        ],
+        "powerpoint": ["powerpnt.exe"],
+        "ppt": ["powerpnt.exe"],
+        "word": ["winword.exe"],
+        "excel": ["excel.exe"],
         "notepad": ["notepad.exe"],
         "calculator": ["calc.exe"],
         "calc": ["calc.exe"],
-        "code": ["code"],
-        "vscode": ["code"],
-        "cmd": ["cmd.exe"],
-        "powershell": ["powershell.exe"],
+        "paint": ["mspaint.exe"],
         "spotify": [os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe")]
     }
 
+    # Commands explicitly blocked from running to keep system integrity safe
+    BLOCKED_ADMIN_TERMS = [
+        "format", "diskpart", "bcdedit", "reg delete", "net user", 
+        "takeown", "icacls", "del /f /s /q c:\\", "rmdir /s /q c:\\", 
+        "shutdown", "restart-computer", "powershell -executionpolicy bypass"
+    ]
+
+    @classmethod
+    def is_safe_command(cls, cmd: str) -> bool:
+        c_lower = cmd.lower()
+        return not any(blocked in c_lower for blocked in cls.BLOCKED_ADMIN_TERMS)
+
     @classmethod
     def open_private_browser(cls, target_url: str):
-        """Opens URLs in Incognito/InPrivate so browser history and cookies are never saved."""
         chrome_paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -222,8 +264,56 @@ class SystemAutomation:
                 subprocess.Popen([p, "-inprivate", target_url])
                 return
 
-        # Fallback to default browser
         webbrowser.open(target_url)
+
+    @classmethod
+    def generate_presentation(cls, topic: str, slides_data: list) -> str:
+        """Creates a professional .pptx presentation directly on Desktop and launches PowerPoint."""
+        try:
+            from pptx import Presentation
+            from pptx.util import Inches, Pt
+            from pptx.dml.color import RGBColor
+
+            prs = Presentation()
+            # Set slide width and height to 16:9 widescreen
+            prs.slide_width = Inches(13.33)
+            prs.slide_height = Inches(7.5)
+
+            # Title Slide
+            title_layout = prs.slide_layouts[0]
+            title_slide = prs.slides.add_slide(title_layout)
+            title_slide.shapes.title.text = topic.title()
+            title_slide.placeholders[1].text = "Generated autonomously by Spark Assistant"
+
+            # Content Slides
+            bullet_layout = prs.slide_layouts[1]
+            for s in slides_data:
+                slide = prs.slides.add_slide(bullet_layout)
+                slide.shapes.title.text = s.get("title", "Topic Overview")
+                
+                body_shape = slide.placeholders[1]
+                tf = body_shape.text_frame
+                tf.clear()
+
+                for i, bullet in enumerate(s.get("points", [])):
+                    p = tf.add_paragraph() if i > 0 else tf.paragraphs[0]
+                    p.text = bullet
+                    p.font.size = Pt(20)
+
+            # Save to Desktop
+            safe_name = re.sub(r'[\\/*?:"<>| ]', '_', topic)[:25]
+            out_path = Path.home() / "Desktop" / f"{safe_name}_Presentation.pptx"
+            prs.save(str(out_path))
+
+            # Open with PowerPoint
+            try:
+                os.startfile(str(out_path))
+            except Exception:
+                subprocess.Popen(["start", "", str(out_path)], shell=True)
+
+            return f"Successfully generated presentation '{out_path.name}' and opened it on your screen!"
+        except Exception as e:
+            return f"Created draft content for '{topic}', but encountered an issue compiling the .pptx: {e}"
 
     @classmethod
     def join_roblox_game(cls, experience_name_or_id: str) -> str:
@@ -252,6 +342,18 @@ class SystemAutomation:
     def open_app(cls, app_name: str) -> str:
         clean = app_name.strip().lower()
 
+        if "powerpoint" in clean or "ppt" in clean or "presentation" in clean:
+            subprocess.Popen(["cmd", "/c", "start", "powerpnt"], shell=True)
+            return "Opening Microsoft PowerPoint!"
+
+        if "word" in clean or "doc" in clean:
+            subprocess.Popen(["cmd", "/c", "start", "winword"], shell=True)
+            return "Opening Microsoft Word!"
+
+        if "excel" in clean or "spreadsheet" in clean:
+            subprocess.Popen(["cmd", "/c", "start", "excel"], shell=True)
+            return "Opening Microsoft Excel!"
+
         if "what" in clean and ("app" in clean or "sap" in clean):
             try:
                 subprocess.Popen(["cmd", "/c", "start", "whatsapp:"], shell=True)
@@ -259,40 +361,6 @@ class SystemAutomation:
             except Exception:
                 cls.open_private_browser("https://web.whatsapp.com")
                 return "Opening WhatsApp Web privately."
-
-        if "roblox" in clean:
-            roblox_local = os.path.expandvars(r"%LOCALAPPDATA%\Roblox\Versions")
-            if os.path.exists(roblox_local):
-                exes = glob.glob(os.path.join(roblox_local, "**", "*.exe"), recursive=True)
-                for exe in exes:
-                    if "robloxplayer" in os.path.basename(exe).lower():
-                        try:
-                            subprocess.Popen([exe], shell=True)
-                            return "Launching Roblox Player!"
-                        except Exception:
-                            pass
-
-            pf_paths = [
-                os.path.expandvars(r"%ProgramFiles(x86)%\Roblox\Versions"),
-                os.path.expandvars(r"%ProgramFiles%\Roblox\Versions")
-            ]
-            for p_dir in pf_paths:
-                if os.path.exists(p_dir):
-                    exes = glob.glob(os.path.join(p_dir, "**", "*.exe"), recursive=True)
-                    for exe in exes:
-                        if "robloxplayer" in os.path.basename(exe).lower():
-                            try:
-                                subprocess.Popen([exe], shell=True)
-                                return "Launching Roblox Player!"
-                            except Exception:
-                                pass
-
-            for proto in ["roblox-player:", "roblox:"]:
-                try:
-                    subprocess.Popen(f'start "" "{proto}"', shell=True)
-                    return "Launching Roblox Player!"
-                except Exception:
-                    pass
 
         if clean in cls.APP_ALIASES:
             for path in cls.APP_ALIASES[clean]:
@@ -303,6 +371,7 @@ class SystemAutomation:
                     except Exception:
                         pass
 
+        # Windows Search Fallback
         search_dirs = [
             os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs"),
             os.path.expandvars(r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs"),
@@ -326,21 +395,14 @@ class SystemAutomation:
                         except Exception:
                             pass
 
-        try:
-            ps_cmd = f"Get-AppxPackage | Where-Object {{ $_.Name -like '*{query_keywords[0]}*' }} | Select-Object -ExpandProperty PackageFamilyName -First 1"
-            res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=3)
-            pfn = res.stdout.strip()
-            if pfn:
-                subprocess.Popen(["powershell", "-NoProfile", "-Command", f"Start-Process 'shell:AppsFolder\\{pfn}!App'"], shell=True)
-                return f"Launching {app_name.title()}!"
-        except Exception:
-            pass
-
-        return f"Could not find '{app_name}' installed on this PC."
+        return f"Could not find application '{app_name}' installed locally."
 
     @classmethod
     def system_command(cls, action_type: str, detail: str = "") -> str:
         action_type = action_type.lower()
+        if not cls.is_safe_command(detail):
+            return "Action blocked: Administrative / high-risk system commands are disabled for safety."
+
         if action_type == "lock_pc":
             subprocess.Popen("rundll32.exe user32.dll,LockWorkStation", shell=True)
             return "PC locked."
@@ -353,7 +415,7 @@ class SystemAutomation:
         elif action_type == "open_url":
             target = detail if detail.startswith("http") else f"https://{detail}"
             cls.open_private_browser(target)
-            return f"Navigating privately to {target} (No history saved)."
+            return f"Navigating privately to {target} (Incognito)."
         elif action_type == "search_web":
             target = f"https://www.google.com/search?q={urllib.parse.quote_plus(detail)}"
             cls.open_private_browser(target)
@@ -362,10 +424,10 @@ class SystemAutomation:
             target = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(detail)}"
             cls.open_private_browser(target)
             return f"Searching YouTube privately for '{detail}' (Incognito)."
-        return "Task finished."
+        return "Task complete."
 
 
-# ----------------- TASK EXECUTION & GEMINI WORKER -----------------
+# ----------------- INTENT PARSING & GEMINI WORKER -----------------
 class TaskExecutionWorker(QThread):
     task_completed = pyqtSignal(str)
 
@@ -376,7 +438,18 @@ class TaskExecutionWorker(QThread):
     def run(self):
         p = self.prompt.strip().lower()
 
-        # Roblox experiences
+        # Macro / AFK Controls
+        if any(w in p for w in ["stop macro", "stop afk", "pause macro", "disable afk", "stop farming"]):
+            res = GameMacroController.stop_anti_afk()
+            self.task_completed.emit(res)
+            return
+
+        if any(w in p for w in ["afk", "farm blox fruit", "play blox fruit", "auto click", "grind blox"]):
+            res = GameMacroController.start_anti_afk(mode="farm")
+            self.task_completed.emit(res)
+            return
+
+        # Roblox game launcher
         if "roblox" in p or any(g in p for g in ROBLOX_EXPERIENCES):
             for game_name in ROBLOX_EXPERIENCES:
                 if game_name in p:
@@ -384,9 +457,9 @@ class TaskExecutionWorker(QThread):
                     self.task_completed.emit(res)
                     return
 
-        # App / Launch / Play shortcuts
-        if re.search(r'^(?:open|opn|opne|start|strat|launch|play|run)\s+(.+)', p):
-            target = re.sub(r'^(?:open|opn|opne|start|strat|launch|play|run)\s+', '', p).strip()
+        # Direct App / Web triggers
+        if re.search(r'^(?:open|opn|launch|start|run)\s+(.+)', p):
+            target = re.sub(r'^(?:open|opn|launch|start|run)\s+', '', p).strip()
             if "." in target and not target.endswith(".exe") and " " not in target:
                 res = SystemAutomation.system_command("open_url", target)
             else:
@@ -394,34 +467,31 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # Web & YouTube search shortcuts (Incognito)
-        if re.search(r'^(?:search|seach|serch|google|gogle|lookup|find)\s+(.+)', p):
-            query = re.sub(r'^(?:search|seach|serch|google|gogle|lookup|find)\s+', '', p).strip()
-            if any(k in query for k in ["youtube", "yt", "utube"]):
-                clean_q = re.sub(r'\b(on\s+)?(youtube|yt|utube)\b', '', query).strip()
+        # Web & YouTube Private Searches
+        if re.search(r'^(?:search|lookup|google|find)\s+(.+)', p):
+            query = re.sub(r'^(?:search|lookup|google|find)\s+', '', p).strip()
+            if any(k in query for k in ["youtube", "yt"]):
+                clean_q = re.sub(r'\b(on\s+)?(youtube|yt)\b', '', query).strip()
                 res = SystemAutomation.system_command("search_youtube", clean_q)
             else:
                 res = SystemAutomation.system_command("search_web", query)
             self.task_completed.emit(res)
             return
 
-        if re.search(r'(?:(?:open\s+)?(?:yt|youtube|utube)\s+(?:and\s+)?(?:search|seach|serch)\s+|(?:search|seach|serch)\s+(?:on\s+)?(?:yt|youtube|utube)\s+(?:for\s+)?|youtube\s+search\s+)(.+)', p):
-            query = re.search(r'(?:(?:open\s+)?(?:yt|youtube|utube)\s+(?:and\s+)?(?:search|seach|serch)\s+|(?:search|seach|serch)\s+(?:on\s+)?(?:yt|youtube|utube)\s+(?:for\s+)?|youtube\s+search\s+)(.+)', p).group(1).strip()
-            res = SystemAutomation.system_command("search_youtube", query)
-            self.task_completed.emit(res)
-            return
-
-        # Gemini Stateless Dispatcher
+        # Advanced Intent Dispatcher (Gemini 2.5 Flash)
         try:
             from google import genai
             from google.genai import types
 
             client = genai.Client(api_key=API_KEY)
             system_prompt = (
-                "You are an isolated, private desktop assistant. You act as an independent AI. "
-                "Decide whether the user wants to execute a computer task or ask a question. "
-                "If it is a computer task, output ONLY JSON: {\"action\": \"join_roblox\"|\"open_app\"|\"system_action\"|\"none\", \"parameter\": \"...\"}. "
-                "If general query/chat, answer directly and concisely."
+                "You are an isolated, private desktop assistant that controls PC tasks and answers questions.\n"
+                "Rules:\n"
+                "1. If the user wants a PowerPoint presentation created, output JSON: {\"action\": \"create_ppt\", \"topic\": \"...\", \"slides\": [{\"title\": \"...\", \"points\": [\"...\", \"...\"]}]}\n"
+                "2. If the user wants to open an app, join a game, or perform a system task, output JSON: {\"action\": \"open_app\"|\"join_roblox\"|\"system_action\", \"parameter\": \"...\"}\n"
+                "3. You MUST NEVER run or recommend admin/destructive actions (formatting disks, deleting user files, modifying boot records).\n"
+                "4. If it's a general question or conversation, reply directly and helpfully with text.\n"
+                "When returning JSON, output ONLY the JSON with no markdown tags."
             )
 
             res = client.models.generate_content(
@@ -429,8 +499,8 @@ class TaskExecutionWorker(QThread):
                 contents=self.prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
-                    temperature=0.2,
-                    max_output_tokens=250
+                    temperature=0.3,
+                    max_output_tokens=700
                 )
             )
 
@@ -440,18 +510,23 @@ class TaskExecutionWorker(QThread):
                 try:
                     action_data = json.loads(response_raw)
                     act = action_data.get("action")
-                    param = action_data.get("parameter", "")
 
-                    if act == "join_roblox":
-                        out = SystemAutomation.join_roblox_game(param)
+                    if act == "create_ppt":
+                        topic = action_data.get("topic", "Presentation")
+                        slides = action_data.get("slides", [])
+                        out = SystemAutomation.generate_presentation(topic, slides)
+                        self.task_completed.emit(out)
+                        return
+                    elif act == "join_roblox":
+                        out = SystemAutomation.join_roblox_game(action_data.get("parameter", ""))
                         self.task_completed.emit(out)
                         return
                     elif act == "open_app":
-                        out = SystemAutomation.open_app(param)
+                        out = SystemAutomation.open_app(action_data.get("parameter", ""))
                         self.task_completed.emit(out)
                         return
                     elif act == "system_action":
-                        out = SystemAutomation.system_command(param)
+                        out = SystemAutomation.system_command(action_data.get("parameter", ""))
                         self.task_completed.emit(out)
                         return
                 except Exception:
@@ -459,7 +534,7 @@ class TaskExecutionWorker(QThread):
 
             self.task_completed.emit(response_raw)
         except Exception as e:
-            self.task_completed.emit(f"Could not complete task: {e}")
+            self.task_completed.emit(f"Error handling task: {e}")
 
 
 # ----------------- UI WINDOWS -----------------
@@ -642,7 +717,7 @@ class GeminiDesktopAssistant(QMainWindow):
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(700, 520)
+        self.resize(720, 530)
 
         container = QWidget(self)
         container.setObjectName("Card")
@@ -682,7 +757,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.chat_layout.addStretch()
         self.scroll.setWidget(self.chat_container)
 
-        self.append_bubble("assistant", f"Hello {self.active_user}! Private mode active: zero history logged, incognito enabled.")
+        self.append_bubble("assistant", f"Hello {self.active_user}! System tasks, presentation creation, safe gaming macros, and private browsing are ready.")
 
         input_container = QWidget()
         input_container.setStyleSheet("background: rgba(36, 38, 44, 240); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px;")
@@ -690,7 +765,7 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.setContentsMargins(16, 8, 12, 8)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Search or run tasks privately (Incognito)...")
+        self.input_field.setPlaceholderText("Create a presentation, farm Blox Fruits, open apps, or ask questions...")
         self.input_field.setFont(QFont("Segoe UI", 13))
         self.input_field.setStyleSheet("background: transparent; color: #f1f3f4; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
@@ -713,7 +788,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.move((screen.width() - self.width()) // 2, int(screen.height() * 0.16))
         self.drag_pos = QPoint()
 
-        # Silent updater thread starts in background
+        # Background updater thread
         self.updater = AutoUpdater()
         self.updater.start()
 
