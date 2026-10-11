@@ -1,6 +1,14 @@
 ﻿# -*- coding: utf-8 -*-
 import sys
 import os
+
+# ----------------- FIX NOCONSOLE MULTIPROCESSING STREAMS -----------------
+# Prevents AttributeError: 'NoneType' object has no attribute 'write'
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
 import re
 import time
 import json
@@ -23,12 +31,21 @@ import multiprocessing as mp
 import queue
 from threading import Event, Lock, Thread, current_thread
 from urllib.parse import quote_plus
-
-import cv2
-import mediapipe as mp_mediapipe
 import numpy as np
-import speech_recognition as sr
-import keyboard
+
+# Safe dynamic vision & input imports
+cv2 = None
+mp_mediapipe = None
+sr = None
+keyboard = None
+
+try:
+    import cv2
+    import mediapipe as mp_mediapipe
+    import speech_recognition as sr
+    import keyboard
+except ImportError:
+    pass
 
 from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -165,10 +182,10 @@ def enable_windows_startup():
         pass
 
 # ============================================================
-# HAND TRACKING & VISION ENGINE
+# SAFE CAMERA AND VISION ENGINE
 # ============================================================
 class CameraStream:
-    def __init__(self, preferred_index=1):
+    def __init__(self, preferred_index=0):
         self.preferred_index = preferred_index
         self.cap = None
         self.thread = None
@@ -178,35 +195,26 @@ class CameraStream:
         self.running = False
 
     def start(self):
-        indices_to_test = [self.preferred_index, 0, 1]
+        if cv2 is None:
+            raise RuntimeError("OpenCV not installed.")
+        
+        # Test default webcam indices safely
         opened = False
-
-        for idx in indices_to_test:
-            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-            if not cap.isOpened():
-                cap.release()
-                cap = cv2.VideoCapture(idx)
-
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                cap.set(cv2.CAP_PROP_FPS, 30)
-                try:
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                except Exception:
-                    pass
-
-                ret, test_frame = cap.read()
-                if ret and test_frame is not None and np.mean(test_frame) > 4.0:
-                    self.cap = cap
-                    opened = True
-                    break
-                cap.release()
+        for idx in [self.preferred_index, 0, 1]:
+            for backend in [cv2.CAP_DSHOW, cv2.CAP_ANY]:
+                cap = cv2.VideoCapture(idx, backend)
+                if cap.isOpened():
+                    ret, test_frame = cap.read()
+                    if ret and test_frame is not None:
+                        self.cap = cap
+                        opened = True
+                        break
+                    cap.release()
+            if opened:
+                break
 
         if not opened:
-            self.cap = cv2.VideoCapture(0)
-            if not self.cap.isOpened():
-                raise RuntimeError("No operational webcam found on the system.")
+            raise RuntimeError("NO_CAMERA_FOUND")
 
         self.stop_event.clear()
         self.running = True
@@ -251,6 +259,8 @@ class CameraStream:
         self.running = False
 
 def voice_worker(command_queue, stop_event):
+    if sr is None:
+        return
     recognizer = sr.Recognizer()
     recognizer.dynamic_energy_threshold = True
     recognizer.pause_threshold = 0.5
@@ -392,7 +402,11 @@ def draw_hud(frame, gesture, sensitivity, status):
         cv2.rectangle(frame, (w - 310, 20), (w - 20, 58), (10, 10, 18), -1)
         cv2.putText(frame, status[:32], (w - 295, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
 
-def virtual_mouse_process_worker(shutdown_event):
+def virtual_mouse_process_worker(shutdown_event, error_queue):
+    if cv2 is None or mp_mediapipe is None:
+        error_queue.put("MISSING_DEPS")
+        return
+
     sensitivity = 1.0
     camera = None
     hands = None
@@ -414,7 +428,11 @@ def virtual_mouse_process_worker(shutdown_event):
     status_until = 0.0
 
     try:
-        camera = CameraStream(preferred_index=1).start()
+        try:
+            camera = CameraStream(preferred_index=0).start()
+        except RuntimeError:
+            error_queue.put("NO_CAMERA")
+            return
 
         hands = mp_mediapipe.solutions.hands.Hands(
             static_image_mode=False,
@@ -440,11 +458,12 @@ def virtual_mouse_process_worker(shutdown_event):
             nonlocal sensitivity
             sensitivity = max(0.4, round(sensitivity - 0.1, 1))
 
-        try:
-            keyboard.add_hotkey("]", inc_speed)
-            keyboard.add_hotkey("[", dec_speed)
-        except Exception:
-            pass
+        if keyboard is not None:
+            try:
+                keyboard.add_hotkey("]", inc_speed)
+                keyboard.add_hotkey("[", dec_speed)
+            except Exception:
+                pass
 
         cv2.namedWindow("Virtual Mouse Pro", cv2.WINDOW_NORMAL)
 
@@ -608,14 +627,15 @@ def virtual_mouse_process_worker(shutdown_event):
             if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                 break
 
-    except KeyboardInterrupt:
+    except Exception:
         pass
     finally:
-        try:
-            keyboard.remove_hotkey("]")
-            keyboard.remove_hotkey("[")
-        except Exception:
-            pass
+        if keyboard is not None:
+            try:
+                keyboard.remove_hotkey("]")
+                keyboard.remove_hotkey("[")
+            except Exception:
+                pass
 
         if voice_stop is not None:
             voice_stop.set()
@@ -656,6 +676,7 @@ def virtual_mouse_process_worker(shutdown_event):
 class VirtualMouseManager:
     _process = None
     _shutdown_event = None
+    _error_queue = None
 
     @classmethod
     def is_running(cls) -> bool:
@@ -663,17 +684,35 @@ class VirtualMouseManager:
 
     @classmethod
     def start(cls) -> str:
+        if cv2 is None or mp_mediapipe is None:
+            return "Virtual Mouse Pro requires 'opencv-python' and 'mediapipe'."
+
         if cls.is_running():
             return "Virtual Mouse Pro is already running."
 
         cls._shutdown_event = mp.Event()
+        cls._error_queue = mp.Queue()
         cls._process = mp.Process(
             target=virtual_mouse_process_worker,
-            args=(cls._shutdown_event,),
+            args=(cls._shutdown_event, cls._error_queue),
             daemon=True
         )
         cls._process.start()
-        return "Virtual Mouse Pro & Voice Engine started! Control your PC touch-free. Say 'stop virtual mouse' to close."
+
+        # Check for immediate camera initialization failures
+        time.sleep(0.6)
+        if not cls._process.is_alive():
+            err = "NO_CAMERA"
+            try:
+                err = cls._error_queue.get_nowait()
+            except Exception:
+                pass
+            cls._process = None
+            if err == "NO_CAMERA":
+                return "No operational webcam found on this PC. Please connect a camera to use Virtual Mouse Pro."
+            return "Failed to initialize camera or vision engine."
+
+        return "Virtual Mouse Pro started! Control your PC touch-free. Say 'stop virtual mouse' to close."
 
     @classmethod
     def stop(cls) -> str:
@@ -683,14 +722,14 @@ class VirtualMouseManager:
         if cls._shutdown_event is not None:
             cls._shutdown_event.set()
 
-        cls._process.join(timeout=1.5)
+        cls._process.join(timeout=1.0)
         if cls._process.is_alive():
             cls._process.terminate()
             cls._process.join(timeout=0.5)
 
         cls._process = None
         cls._shutdown_event = None
-        return "Virtual Mouse Pro and camera feed safely closed."
+        return "Virtual Mouse Pro safely closed."
 
 # ============================================================
 # BULLETPROOF BACKGROUND AUTO-UPDATER
@@ -1103,14 +1142,6 @@ class AdminWorkspaceDialog(QDialog):
                 color: #e0e0e0;
                 font-size: 13px;
             }
-            QGroupBox {
-                border: 1px solid #222225;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 15px;
-                font-weight: bold;
-                color: #8ab4f8;
-            }
             QPushButton {
                 background-color: #121316;
                 color: #ffffff;
@@ -1128,11 +1159,6 @@ class AdminWorkspaceDialog(QDialog):
                 background-color: #132d20;
                 color: #81c995;
                 border: 1px solid #2d6b47;
-            }
-            QPushButton#DangerBtn {
-                background-color: #311313;
-                color: #f28b82;
-                border: 1px solid #6b2d2d;
             }
             QLineEdit {
                 background-color: #0d0d0f;
@@ -1156,7 +1182,6 @@ class AdminWorkspaceDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        # Header Title
         head = QHBoxLayout()
         title = QLabel("⚡ Dedicated Admin Control Hub")
         title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
@@ -1169,20 +1194,16 @@ class AdminWorkspaceDialog(QDialog):
         head.addWidget(log_btn)
         layout.addLayout(head)
 
-        # Quick Control Panel Row
         quick_grid = QHBoxLayout()
 
-        # Virtual Mouse Quick Toggle
         self.vm_btn = QPushButton("Toggle Virtual Mouse Pro")
         self.vm_btn.clicked.connect(self.toggle_vm)
         quick_grid.addWidget(self.vm_btn)
 
-        # Anti-AFK Quick Toggle
         self.afk_btn = QPushButton("Toggle Blox Anti-AFK")
         self.afk_btn.clicked.connect(self.toggle_afk)
         quick_grid.addWidget(self.afk_btn)
 
-        # Blox Fruits Marine / Pirate Selector
         marine_btn = QPushButton("Select Marine")
         marine_btn.clicked.connect(lambda: self.run_macro("marine"))
         quick_grid.addWidget(marine_btn)
@@ -1193,14 +1214,12 @@ class AdminWorkspaceDialog(QDialog):
 
         layout.addLayout(quick_grid)
 
-        # Admin Diagnostic Terminal Console
         layout.addWidget(QLabel("Administrative Diagnostic Output & Execution Log:"))
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
         self.console_output.append("[SYSTEM] Admin Session Authenticated. Elevated Workspace Operational.\n")
         layout.addWidget(self.console_output, 1)
 
-        # Direct Command Input
         cmd_row = QHBoxLayout()
         self.admin_cmd_input = QLineEdit()
         self.admin_cmd_input.setPlaceholderText("Enter administrative diagnostic or test query...")
@@ -1259,7 +1278,6 @@ class AdminWorkspaceDialog(QDialog):
         self.admin_cmd_input.clear()
         self.console_output.append(f"> {query}")
 
-        # Execute elevated admin diagnostic task
         if query.lower() in ("clear", "cls"):
             self.console_output.clear()
             return
@@ -1610,7 +1628,6 @@ class GeminiDesktopAssistant(QMainWindow):
         self.top_bar.addWidget(self.title_lbl)
         self.top_bar.addStretch()
 
-        # ONLY VISIBLE IF IS_ADMIN IS TRUE: Dedicated Admin Hub Button
         if self.is_admin:
             self.admin_hub_btn = QPushButton("⚡ Admin Hub")
             self.admin_hub_btn.setFixedSize(94, 22)
@@ -1680,7 +1697,7 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.setContentsMargins(12, 4, 8, 4)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Search, hand mouse, blox fruit side, afk, or ask...")
+        self.input_field.setPlaceholderText("Search, open apps, blox fruit side, afk, or ask...")
         self.input_field.setFont(QFont("Segoe UI", 11))
         self.input_field.setStyleSheet("background: transparent; color: #ffffff; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
@@ -1705,7 +1722,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.updater = AutoUpdater()
         self.updater.start()
 
-        self.append_bubble("assistant", f"Online, {self.active_user}! Type 'start virtual mouse' for touchless control, or open '⚡ Admin Hub' for direct operations.")
+        self.append_bubble("assistant", f"Online, {self.active_user}! Auto-updater active. Triple-click bar to expand/shrink.")
 
     def clean_exit(self):
         VirtualMouseManager.stop()
