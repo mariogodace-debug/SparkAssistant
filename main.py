@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 APP_NAME = "SparkAssistant"
 GITHUB_REPO = "mariogodace-debug/SparkAssistant"
 
-# Base64-encoded key to bypass GitHub Push Protection scans
+# Base64-encoded key to prevent GitHub Push Protection scans
 API_KEY_B64 = "QVEuQWI4Uk42SlpPeWRqaVZDUmRLOHBTYS10S003S1VBN2FjRl9SN1F0OWdTQTZ6bnpxV2c="
 API_KEY = base64.b64decode(API_KEY_B64).decode("utf-8")
 
@@ -108,14 +108,10 @@ def bring_window_to_front(hwnd):
 
 # ----------------- CONTINUOUS SELF-UPGRADE ENGINE -----------------
 class AutoUpdater(QThread):
-    """
-    Checks GitHub Releases periodically.
-    If a new version is pushed, it silently downloads and replaces the binary.
-    """
     def run(self):
         while True:
             try:
-                time.sleep(10)  # Initial wait, then checks periodically
+                time.sleep(10)
                 api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/latest"
                 req = urllib.request.Request(api_url, headers={"User-Agent": "SparkAssistant-AutoUpdater"})
                 with urllib.request.urlopen(req, timeout=8) as response:
@@ -137,7 +133,7 @@ class AutoUpdater(QThread):
                                 return
             except Exception:
                 pass
-            time.sleep(300)  # Check every 5 minutes in background
+            time.sleep(300)
 
     def silent_replace_and_restart(self, download_url: str, new_stamp: str):
         try:
@@ -148,7 +144,6 @@ class AutoUpdater(QThread):
             urllib.request.urlretrieve(download_url, new_exe)
             VERSION_STAMP_FILE.write_text(new_stamp, encoding="utf-8")
 
-            # Batch script handles swap safely without file-lock collisions
             bat_path = os.path.join(temp_dir, "silent_swap.bat")
             with open(bat_path, "w") as f:
                 f.write(f"""@echo off
@@ -322,7 +317,6 @@ class SystemAutomation:
         "spotify": (os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe"), "Spotify")
     }
 
-    # Strict Sandbox: Denies all invasive system controls
     BLOCKED_TERMS = [
         "format", "diskpart", "bcdedit", "reg delete", "reg add", "net user",
         "takeown", "icacls", "del /f", "rmdir", "shutdown", "restart-computer",
@@ -558,7 +552,7 @@ class TaskExecutionWorker(QThread):
             )
 
             res = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=self.prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
@@ -826,12 +820,15 @@ class GeminiDesktopAssistant(QMainWindow):
         exit_btn.clicked.connect(QApplication.instance().quit)
         self.top_bar.addWidget(exit_btn)
 
+        # Pure Pitch-Black Scroll Area & Viewport Styling
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self.scroll.viewport().setStyleSheet("background-color: #000000; border: none;")
+        self.scroll.setStyleSheet("QScrollArea { background-color: #000000; border: none; }")
 
         self.chat_container = QWidget()
+        self.chat_container.setStyleSheet("background-color: #000000; border: none;")
         self.chat_layout = QVBoxLayout(self.chat_container)
         self.chat_layout.addStretch()
         self.scroll.setWidget(self.chat_container)
