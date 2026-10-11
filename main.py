@@ -1,4 +1,5 @@
-﻿import sys
+﻿# -*- coding: utf-8 -*-
+import sys
 import os
 import re
 import time
@@ -17,6 +18,17 @@ from pathlib import Path
 import ctypes
 from ctypes import wintypes
 import winreg
+import math
+import multiprocessing as mp
+import queue
+from threading import Event, Lock, Thread, current_thread
+from urllib.parse import quote_plus
+
+import cv2
+import mediapipe as mp_mediapipe
+import numpy as np
+import speech_recognition as sr
+import keyboard
 
 from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
@@ -24,14 +36,93 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QLineEdit, QLabel, 
     QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
     QScrollArea, QFrame, QDialog, QMessageBox, QRadioButton, 
-    QButtonGroup, QTableWidget, QTableWidgetItem, QHeaderView
+    QButtonGroup, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit
 )
 
-# ----------------- CONFIGURATION -----------------
+# ============================================================
+# WINDOWS DPI & SCREEN SETUP
+# ============================================================
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+user32 = ctypes.windll.user32
+screen_w = max(1, user32.GetSystemMetrics(0))
+screen_h = max(1, user32.GetSystemMetrics(1))
+
+# ============================================================
+# WIN32 FAST INPUT CONSTANTS & HELPERS
+# ============================================================
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_WHEEL = 0x0800
+VK_F4 = 0x73
+KEYEVENTF_KEYUP = 0x0002
+
+def clamp(val, min_val, max_val):
+    return max(min_val, min(max_val, val))
+
+def fast_move(x, y):
+    cx = int(clamp(x, 0, screen_w - 1))
+    cy = int(clamp(y, 0, screen_h - 1))
+    user32.SetCursorPos(cx, cy)
+
+def fast_click():
+    user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+def fast_right_click():
+    user32.mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0)
+    user32.mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0)
+
+def fast_scroll(amount):
+    if amount:
+        user32.mouse_event(MOUSEEVENTF_WHEEL, 0, 0, int(amount), 0)
+
+def send_alt_f4():
+    user32.keybd_event(0x12, 0, 0, 0)
+    user32.keybd_event(VK_F4, 0, 0, 0)
+    user32.keybd_event(VK_F4, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(0x12, 0, KEYEVENTF_KEYUP, 0)
+
+def find_window_by_title_substring(substring: str):
+    found_hwnd = None
+
+    def enum_windows_proc(hwnd, lParam):
+        nonlocal found_hwnd
+        if user32.IsWindowVisible(hwnd):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buff, length + 1)
+                if substring.lower() in buff.value.lower():
+                    found_hwnd = hwnd
+                    return False
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows(WNDENUMPROC(enum_windows_proc), 0)
+    return found_hwnd
+
+def bring_window_to_front(hwnd):
+    if not hwnd:
+        return False
+    user32.ShowWindow(hwnd, 9)
+    user32.SetForegroundWindow(hwnd)
+    return True
+
+# ============================================================
+# APP CONFIGURATION
+# ============================================================
 APP_NAME = "SparkAssistant"
 GITHUB_REPO = "mariogodace-debug/SparkAssistant"
 
-# Base64-encoded key to bypass GitHub Push Protection scans
 API_KEY_B64 = "QVEuQWI4Uk42SlpPeWRqaVZDUmRLOHBTYS10S003S1VBN2FjRl9SN1F0OWdTQTZ6bnpxV2c="
 API_KEY = base64.b64decode(API_KEY_B64).decode("utf-8")
 
@@ -57,9 +148,7 @@ ROBLOX_EXPERIENCES = {
     "doors": "6516141723",
 }
 
-# ----------------- AUTO-START WITH WINDOWS -----------------
 def enable_windows_startup():
-    """Adds the app to current user startup registry (Low Privilege / Non-Admin)."""
     try:
         exe_path = sys.executable
         if not exe_path.lower().endswith(".exe"):
@@ -75,38 +164,537 @@ def enable_windows_startup():
     except Exception:
         pass
 
+# ============================================================
+# HAND TRACKING & VISION ENGINE
+# ============================================================
+class CameraStream:
+    def __init__(self, preferred_index=1):
+        self.preferred_index = preferred_index
+        self.cap = None
+        self.thread = None
+        self.stop_event = Event()
+        self.lock = Lock()
+        self.frame = None
+        self.running = False
 
-# ----------------- WINDOWS API UTILITIES -----------------
-user32 = ctypes.windll.user32
+    def start(self):
+        indices_to_test = [self.preferred_index, 0, 1]
+        opened = False
 
-def find_window_by_title_substring(substring: str):
-    found_hwnd = None
+        for idx in indices_to_test:
+            cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(idx)
 
-    def enum_windows_proc(hwnd, lParam):
-        nonlocal found_hwnd
-        if user32.IsWindowVisible(hwnd):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buff = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buff, length + 1)
-                if substring.lower() in buff.value.lower():
-                    found_hwnd = hwnd
-                    return False
-        return True
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap.set(cv2.CAP_PROP_FPS, 30)
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
 
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-    user32.EnumWindows(WNDENUMPROC(enum_windows_proc), 0)
-    return found_hwnd
+                ret, test_frame = cap.read()
+                if ret and test_frame is not None and np.mean(test_frame) > 4.0:
+                    self.cap = cap
+                    opened = True
+                    break
+                cap.release()
 
-def bring_window_to_front(hwnd):
-    if not hwnd:
-        return False
-    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-    user32.SetForegroundWindow(hwnd)
-    return True
+        if not opened:
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                raise RuntimeError("No operational webcam found on the system.")
 
+        self.stop_event.clear()
+        self.running = True
+        self.thread = Thread(target=self._reader, name="CameraWorker", daemon=True)
+        self.thread.start()
+        return self
 
-# ----------------- BULLETPROOF AUTO-UPDATER -----------------
+    def _reader(self):
+        while not self.stop_event.is_set() and self.cap is not None:
+            ok, frame = self.cap.read()
+            if not ok:
+                time.sleep(0.005)
+                continue
+            with self.lock:
+                self.frame = frame
+        self.running = False
+
+    def read(self):
+        with self.lock:
+            if self.frame is None:
+                return None
+            return self.frame.copy()
+
+    def release(self):
+        self.stop_event.set()
+        cap = self.cap
+        self.cap = None
+
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+        thread = self.thread
+        if thread is not None and thread.is_alive() and thread is not current_thread():
+            thread.join(timeout=1.0)
+
+        self.thread = None
+        with self.lock:
+            self.frame = None
+        self.running = False
+
+def voice_worker(command_queue, stop_event):
+    recognizer = sr.Recognizer()
+    recognizer.dynamic_energy_threshold = True
+    recognizer.pause_threshold = 0.5
+    recognizer.phrase_threshold = 0.2
+    recognizer.non_speaking_duration = 0.3
+
+    try:
+        microphone = sr.Microphone()
+    except Exception:
+        return
+
+    try:
+        with microphone as source:
+            try:
+                recognizer.adjust_for_ambient_noise(source, duration=1.0)
+            except Exception:
+                pass
+
+            while not stop_event.is_set():
+                try:
+                    audio = recognizer.listen(source, timeout=0.5, phrase_time_limit=4)
+                except sr.WaitTimeoutError:
+                    continue
+                except Exception:
+                    time.sleep(0.05)
+                    continue
+
+                if stop_event.is_set():
+                    break
+
+                try:
+                    text = recognizer.recognize_google(audio).lower().strip()
+                except Exception:
+                    continue
+
+                wake_words = (
+                    "hey computer", "hey mouse", "computer", "mouse",
+                    "assistant", "hey jarvis", "hi jarvis", "jarvis"
+                )
+
+                for w in wake_words:
+                    text = text.replace(w, "").strip()
+
+                if not text:
+                    continue
+
+                try:
+                    command_queue.put_nowait(text)
+                except queue.Full:
+                    pass
+    except Exception:
+        return
+
+def handle_voice_command(cmd):
+    cmd = cmd.lower().strip()
+    if not cmd:
+        return ""
+
+    if cmd.startswith("youtube ") or cmd == "youtube":
+        q = cmd[8:].strip() if cmd.startswith("youtube ") else ""
+        url = f"https://www.youtube.com/results?search_query={quote_plus(q)}" if q else "https://www.youtube.com"
+        webbrowser.open(url)
+        return f"YouTube: {q}" if q else "Opening YouTube"
+
+    if cmd.startswith("google ") or cmd == "google":
+        q = cmd[7:].strip() if cmd.startswith("google ") else ""
+        url = f"https://www.google.com/search?q={quote_plus(q)}" if q else "https://www.google.com"
+        webbrowser.open(url)
+        return f"Google: {q}" if q else "Opening Google"
+
+    if cmd in ("close", "close window", "close this", "exit window"):
+        send_alt_f4()
+        return "Closing Window"
+
+    if cmd in ("open browser", "browser"):
+        webbrowser.open("https://www.google.com")
+        return "Opening Browser"
+
+    return f"Voice: {cmd}"
+
+def distance(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+def classify_fingers(points):
+    wrist = points[0]
+    index_ext = distance(points[8], wrist) > distance(points[6], wrist)
+    middle_ext = distance(points[12], wrist) > distance(points[10], wrist)
+    ring_ext = distance(points[16], wrist) > distance(points[14], wrist)
+    pinky_ext = distance(points[20], wrist) > distance(points[18], wrist)
+
+    palm_scale = max(distance(wrist, points[9]), 1.0)
+    thumb_index_dist = distance(points[4], points[6]) / palm_scale
+
+    return index_ext, middle_ext, ring_ext, pinky_ext, thumb_index_dist
+
+FINGER_BONES = [
+    ([(0, 1), (1, 2), (2, 3), (3, 4)], (0, 180, 255)),
+    ([(0, 5), (5, 6), (6, 7), (7, 8)], (255, 230, 0)),
+    ([(9, 10), (10, 11), (11, 12)],    (120, 230, 0)),
+    ([(13, 14), (14, 15), (15, 16)],   (40, 140, 255)),
+    ([(0, 17), (17, 18), (18, 19), (19, 20)], (255, 60, 200)),
+    ([(5, 9), (9, 13), (13, 17)],      (130, 130, 150)),
+]
+
+def draw_glow_skeleton(frame, points):
+    for bones, col in FINGER_BONES:
+        glow_col = tuple(max(0, int(c / 3)) for c in col)
+        for a, b in bones:
+            cv2.line(frame, points[a], points[b], glow_col, 5, cv2.LINE_AA)
+        for a, b in bones:
+            cv2.line(frame, points[a], points[b], col, 1, cv2.LINE_AA)
+
+    for p in points:
+        cv2.circle(frame, p, 4, (20, 20, 20), -1, cv2.LINE_AA)
+        cv2.circle(frame, p, 2, (255, 255, 255), -1, cv2.LINE_AA)
+
+def draw_reticle(frame, center, color, radius=18):
+    x, y = int(center[0]), int(center[1])
+    cv2.circle(frame, (x, y), radius, color, 2, cv2.LINE_AA)
+    cv2.circle(frame, (x, y), radius + 5, tuple(max(0, int(c / 3)) for c in color), 1, cv2.LINE_AA)
+    arm = radius + 8
+    cv2.line(frame, (x - arm, y), (x - radius - 2, y), color, 1, cv2.LINE_AA)
+    cv2.line(frame, (x + radius + 2, y), (x + arm, y), color, 1, cv2.LINE_AA)
+    cv2.line(frame, (x, y - arm), (x, y - radius - 2), color, 1, cv2.LINE_AA)
+    cv2.line(frame, (x, y + radius + 2), (x, y + arm), color, 1, cv2.LINE_AA)
+
+def draw_hud(frame, gesture, sensitivity, status):
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (15, 15), (340, 135), (10, 10, 18), -1)
+    cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
+
+    cv2.putText(frame, "VIRTUAL MOUSE PRO", (30, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(frame, f"GESTURE: {gesture.upper()}", (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 220, 255), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"SPEED: {sensitivity:.1f}x", (30, 94), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (180, 255, 180), 1, cv2.LINE_AA)
+    cv2.putText(frame, "[ / ] SPEED    Q / ESC EXIT", (30, 117), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 190), 1, cv2.LINE_AA)
+
+    if status:
+        h, w = frame.shape[:2]
+        cv2.rectangle(frame, (w - 310, 20), (w - 20, 58), (10, 10, 18), -1)
+        cv2.putText(frame, status[:32], (w - 295, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+
+def virtual_mouse_process_worker(shutdown_event):
+    sensitivity = 1.0
+    camera = None
+    hands = None
+    voice_process = None
+    voice_stop = None
+    voice_queue = None
+
+    last_cursor_pos = None
+    last_scroll_y = None
+    scroll_accumulator = 0.0
+
+    left_gesture_active = False
+    right_gesture_active = False
+    last_left_click_time = 0.0
+    last_right_click_time = 0.0
+
+    click_interval = max(0.2, min(0.6, user32.GetDoubleClickTime() / 1000.0))
+    status_text = ""
+    status_until = 0.0
+
+    try:
+        camera = CameraStream(preferred_index=1).start()
+
+        hands = mp_mediapipe.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            model_complexity=0,
+            min_detection_confidence=0.6,
+            min_tracking_confidence=0.6
+        )
+
+        voice_stop = mp.Event()
+        voice_queue = mp.Queue(maxsize=20)
+        voice_process = mp.Process(target=voice_worker, args=(voice_queue, voice_stop), daemon=True)
+        try:
+            voice_process.start()
+        except Exception:
+            voice_process = None
+
+        def inc_speed():
+            nonlocal sensitivity
+            sensitivity = min(2.5, round(sensitivity + 0.1, 1))
+
+        def dec_speed():
+            nonlocal sensitivity
+            sensitivity = max(0.4, round(sensitivity - 0.1, 1))
+
+        try:
+            keyboard.add_hotkey("]", inc_speed)
+            keyboard.add_hotkey("[", dec_speed)
+        except Exception:
+            pass
+
+        cv2.namedWindow("Virtual Mouse Pro", cv2.WINDOW_NORMAL)
+
+        while not shutdown_event.is_set():
+            frame = camera.read()
+            if frame is None:
+                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                    break
+                continue
+
+            frame = cv2.flip(frame, 1)
+            h, w = frame.shape[:2]
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb)
+
+            gesture = "none"
+            now = time.perf_counter()
+
+            if now >= status_until:
+                status_text = ""
+
+            if results.multi_hand_landmarks:
+                hand = results.multi_hand_landmarks[0]
+                points = [(int(lm.x * w), int(lm.y * h)) for lm in hand.landmark]
+
+                draw_glow_skeleton(frame, points)
+
+                (index_ext, middle_ext, ring_ext, pinky_ext, thumb_index_dist) = classify_fingers(points)
+
+                thumb_tap = thumb_index_dist < 0.35
+                thumb_released = thumb_index_dist > 0.42
+
+                scroll_gesture = index_ext and middle_ext and not ring_ext and not pinky_ext
+                right_click_gesture = index_ext and pinky_ext and not middle_ext and not ring_ext
+                left_click_gesture = index_ext and thumb_tap and not middle_ext and not ring_ext and not pinky_ext
+                navigation_gesture = index_ext and not middle_ext and not ring_ext and not pinky_ext and not thumb_tap
+
+                if scroll_gesture:
+                    mode = "scroll"
+                elif right_click_gesture:
+                    mode = "right_click"
+                elif left_click_gesture:
+                    mode = "left_click"
+                elif navigation_gesture:
+                    mode = "navigation"
+                else:
+                    mode = "none"
+
+                # 1. SCROLL
+                if mode == "scroll":
+                    gesture = "scroll"
+                    draw_reticle(frame, points[8], (120, 230, 0))
+                    current_y = float(points[8][1])
+
+                    if last_scroll_y is not None:
+                        dy = current_y - last_scroll_y
+                        scroll_accumulator += dy * 1.8 * sensitivity
+                        wheel_amount = int(scroll_accumulator)
+
+                        if abs(wheel_amount) >= 1:
+                            wheel_amount = clamp(wheel_amount, -120, 120)
+                            fast_scroll(-wheel_amount)
+                            scroll_accumulator -= wheel_amount
+
+                    last_scroll_y = current_y
+                else:
+                    last_scroll_y = None
+                    scroll_accumulator = 0.0
+
+                # 2. RIGHT CLICK
+                if mode == "right_click":
+                    gesture = "right click"
+                    draw_reticle(frame, points[20], (255, 60, 200))
+
+                    if not right_gesture_active:
+                        if now - last_right_click_time >= 0.4:
+                            fast_right_click()
+                            last_right_click_time = now
+                            status_text = "RIGHT CLICK"
+                            status_until = now + 0.4
+                        right_gesture_active = True
+                else:
+                    right_gesture_active = False
+
+                # 3. LEFT CLICK & DOUBLE CLICK
+                if mode == "left_click":
+                    gesture = "left click"
+                    draw_reticle(frame, points[4], (0, 180, 255))
+
+                    if not left_gesture_active:
+                        if now - last_left_click_time <= click_interval:
+                            fast_click()
+                            status_text = "DOUBLE CLICK"
+                            status_until = now + 0.4
+                            last_left_click_time = 0.0
+                        else:
+                            fast_click()
+                            status_text = "LEFT CLICK"
+                            status_until = now + 0.35
+                            last_left_click_time = now
+                        left_gesture_active = True
+                else:
+                    if thumb_released:
+                        left_gesture_active = False
+
+                # 4. CURSOR NAVIGATION
+                if mode == "navigation":
+                    gesture = "move"
+                    knuckle_pt = points[5]
+                    draw_reticle(frame, points[8], (255, 230, 0))
+
+                    margin_x = int(w * 0.15 / sensitivity)
+                    margin_y = int(h * 0.15 / sensitivity)
+
+                    min_x, max_x = margin_x, w - margin_x - 1
+                    min_y, max_y = margin_y, h - margin_y - 1
+
+                    nx = clamp((knuckle_pt[0] - min_x) / max(1.0, max_x - min_x), 0.0, 1.0)
+                    ny = clamp((knuckle_pt[1] - min_y) / max(1.0, max_y - min_y), 0.0, 1.0)
+
+                    target_x = nx * screen_w
+                    target_y = ny * screen_h
+
+                    if last_cursor_pos is None:
+                        last_cursor_pos = (target_x, target_y)
+                    else:
+                        dx = target_x - last_cursor_pos[0]
+                        dy = target_y - last_cursor_pos[1]
+                        dist = math.hypot(dx, dy)
+
+                        if dist > 1.5:
+                            gain = 0.25 if dist < 20 else (0.55 if dist < 50 else 0.85)
+                            smooth_x = last_cursor_pos[0] + dx * gain
+                            smooth_y = last_cursor_pos[1] + dy * gain
+                            fast_move(smooth_x, smooth_y)
+                            last_cursor_pos = (smooth_x, smooth_y)
+                else:
+                    last_cursor_pos = None
+
+            else:
+                last_cursor_pos = None
+                last_scroll_y = None
+                scroll_accumulator = 0.0
+                left_gesture_active = False
+                right_gesture_active = False
+
+            if voice_queue is not None:
+                while True:
+                    try:
+                        cmd = voice_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    except Exception:
+                        break
+                    status_text = handle_voice_command(cmd)
+                    status_until = time.perf_counter() + 1.5
+
+            draw_hud(frame, gesture, sensitivity, status_text)
+            cv2.imshow("Virtual Mouse Pro", frame)
+
+            if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                break
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        try:
+            keyboard.remove_hotkey("]")
+            keyboard.remove_hotkey("[")
+        except Exception:
+            pass
+
+        if voice_stop is not None:
+            voice_stop.set()
+
+        if voice_process is not None:
+            try:
+                voice_process.join(timeout=1.0)
+            except Exception:
+                pass
+            if voice_process.is_alive():
+                try:
+                    voice_process.terminate()
+                    voice_process.join(timeout=0.5)
+                except Exception:
+                    pass
+
+        if camera is not None:
+            camera.release()
+
+        if hands is not None:
+            hands.close()
+
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+        if voice_queue is not None:
+            try:
+                voice_queue.close()
+                voice_queue.join_thread()
+            except Exception:
+                pass
+
+# ============================================================
+# PERSISTENT MULTIPROCESS TRACKER MANAGER
+# ============================================================
+class VirtualMouseManager:
+    _process = None
+    _shutdown_event = None
+
+    @classmethod
+    def is_running(cls) -> bool:
+        return cls._process is not None and cls._process.is_alive()
+
+    @classmethod
+    def start(cls) -> str:
+        if cls.is_running():
+            return "Virtual Mouse Pro is already running."
+
+        cls._shutdown_event = mp.Event()
+        cls._process = mp.Process(
+            target=virtual_mouse_process_worker,
+            args=(cls._shutdown_event,),
+            daemon=True
+        )
+        cls._process.start()
+        return "Virtual Mouse Pro & Voice Engine started! Control your PC touch-free. Say 'stop virtual mouse' to close."
+
+    @classmethod
+    def stop(cls) -> str:
+        if not cls.is_running():
+            return "Virtual Mouse Pro is not currently running."
+
+        if cls._shutdown_event is not None:
+            cls._shutdown_event.set()
+
+        cls._process.join(timeout=1.5)
+        if cls._process.is_alive():
+            cls._process.terminate()
+            cls._process.join(timeout=0.5)
+
+        cls._process = None
+        cls._shutdown_event = None
+        return "Virtual Mouse Pro and camera feed safely closed."
+
+# ============================================================
+# BULLETPROOF BACKGROUND AUTO-UPDATER
+# ============================================================
 class AutoUpdater(QThread):
     def run(self):
         time.sleep(5)
@@ -178,8 +766,9 @@ class AutoUpdater(QThread):
         except Exception:
             pass
 
-
-# ----------------- DB & AUDIT LOGGING -----------------
+# ============================================================
+# DB & AUDIT LOGGING
+# ============================================================
 def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
@@ -252,11 +841,16 @@ class AuditLogger:
         except Exception:
             pass
 
-
-# ----------------- SAFE GAME MACRO CONTROLLER -----------------
+# ============================================================
+# SAFE ROBLOX MACRO CONTROLLER
+# ============================================================
 class GameMacroController:
     _active = False
     _thread = None
+
+    @classmethod
+    def is_running(cls) -> bool:
+        return cls._active
 
     @classmethod
     def choose_blox_fruit_side(cls, side: str) -> str:
@@ -322,8 +916,9 @@ class GameMacroController:
         cls._active = False
         return "AFK macro stopped."
 
-
-# ----------------- SYSTEM AUTOMATION TOOLS & HARD SANDBOX -----------------
+# ============================================================
+# SYSTEM AUTOMATION TOOLS & SANDBOX
+# ============================================================
 class SystemAutomation:
     APP_ALIASES = {
         "powerpoint": ("powerpnt.exe", "PowerPoint"),
@@ -488,8 +1083,197 @@ class SystemAutomation:
             return f"Searching YouTube privately for '{detail}'."
         return "Task complete."
 
+# ============================================================
+# EXCLUSIVE ADMIN SECTION (ADMIN WORKSPACE & COMMAND HUB)
+# ============================================================
+class AdminWorkspaceDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("⚡ Spark Admin Command Hub")
+        self.resize(760, 520)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #050505;
+                color: #ffffff;
+                font-family: 'Segoe UI';
+                border: 1px solid #1f1f22;
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 13px;
+            }
+            QGroupBox {
+                border: 1px solid #222225;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 15px;
+                font-weight: bold;
+                color: #8ab4f8;
+            }
+            QPushButton {
+                background-color: #121316;
+                color: #ffffff;
+                border: 1px solid #2b2c30;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-size: 12px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #1f2228;
+                border-color: #8ab4f8;
+            }
+            QPushButton#ActiveBtn {
+                background-color: #132d20;
+                color: #81c995;
+                border: 1px solid #2d6b47;
+            }
+            QPushButton#DangerBtn {
+                background-color: #311313;
+                color: #f28b82;
+                border: 1px solid #6b2d2d;
+            }
+            QLineEdit {
+                background-color: #0d0d0f;
+                color: #ffffff;
+                border: 1px solid #2a2a2d;
+                border-radius: 6px;
+                padding: 8px;
+                font-family: 'Consolas', monospace;
+            }
+            QTextEdit {
+                background-color: #08080a;
+                color: #8ab4f8;
+                border: 1px solid #1a1a1c;
+                border-radius: 6px;
+                font-family: 'Consolas', monospace;
+                font-size: 12px;
+            }
+        """)
 
-# ----------------- INTENT DISPATCHER & WORKER -----------------
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Header Title
+        head = QHBoxLayout()
+        title = QLabel("⚡ Dedicated Admin Control Hub")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setStyleSheet("color: #8ab4f8;")
+        head.addWidget(title)
+        head.addStretch()
+
+        log_btn = QPushButton("🛡️ Audit Records")
+        log_btn.clicked.connect(lambda: AdminPanelDialog(self).exec())
+        head.addWidget(log_btn)
+        layout.addLayout(head)
+
+        # Quick Control Panel Row
+        quick_grid = QHBoxLayout()
+
+        # Virtual Mouse Quick Toggle
+        self.vm_btn = QPushButton("Toggle Virtual Mouse Pro")
+        self.vm_btn.clicked.connect(self.toggle_vm)
+        quick_grid.addWidget(self.vm_btn)
+
+        # Anti-AFK Quick Toggle
+        self.afk_btn = QPushButton("Toggle Blox Anti-AFK")
+        self.afk_btn.clicked.connect(self.toggle_afk)
+        quick_grid.addWidget(self.afk_btn)
+
+        # Blox Fruits Marine / Pirate Selector
+        marine_btn = QPushButton("Select Marine")
+        marine_btn.clicked.connect(lambda: self.run_macro("marine"))
+        quick_grid.addWidget(marine_btn)
+
+        pirate_btn = QPushButton("Select Pirate")
+        pirate_btn.clicked.connect(lambda: self.run_macro("pirate"))
+        quick_grid.addWidget(pirate_btn)
+
+        layout.addLayout(quick_grid)
+
+        # Admin Diagnostic Terminal Console
+        layout.addWidget(QLabel("Administrative Diagnostic Output & Execution Log:"))
+        self.console_output = QTextEdit()
+        self.console_output.setReadOnly(True)
+        self.console_output.append("[SYSTEM] Admin Session Authenticated. Elevated Workspace Operational.\n")
+        layout.addWidget(self.console_output, 1)
+
+        # Direct Command Input
+        cmd_row = QHBoxLayout()
+        self.admin_cmd_input = QLineEdit()
+        self.admin_cmd_input.setPlaceholderText("Enter administrative diagnostic or test query...")
+        self.admin_cmd_input.returnPressed.connect(self.execute_admin_command)
+        cmd_row.addWidget(self.admin_cmd_input, 1)
+
+        run_btn = QPushButton("Execute")
+        run_btn.clicked.connect(self.execute_admin_command)
+        cmd_row.addWidget(run_btn)
+        layout.addLayout(cmd_row)
+
+        self.update_toggle_states()
+
+    def update_toggle_states(self):
+        if VirtualMouseManager.is_running():
+            self.vm_btn.setObjectName("ActiveBtn")
+            self.vm_btn.setText("● Virtual Mouse (RUNNING)")
+        else:
+            self.vm_btn.setObjectName("")
+            self.vm_btn.setText("○ Start Virtual Mouse")
+
+        if GameMacroController.is_running():
+            self.afk_btn.setObjectName("ActiveBtn")
+            self.afk_btn.setText("● Anti-AFK (RUNNING)")
+        else:
+            self.afk_btn.setObjectName("")
+            self.afk_btn.setText("○ Start Blox AFK")
+
+        self.vm_btn.setStyle(self.vm_btn.style())
+        self.afk_btn.setStyle(self.afk_btn.style())
+
+    def toggle_vm(self):
+        if VirtualMouseManager.is_running():
+            res = VirtualMouseManager.stop()
+        else:
+            res = VirtualMouseManager.start()
+        self.console_output.append(f"[VM_ENGINE] {res}")
+        self.update_toggle_states()
+
+    def toggle_afk(self):
+        if GameMacroController.is_running():
+            res = GameMacroController.stop_anti_afk()
+        else:
+            res = GameMacroController.start_anti_afk()
+        self.console_output.append(f"[MACRO] {res}")
+        self.update_toggle_states()
+
+    def run_macro(self, side: str):
+        res = GameMacroController.choose_blox_fruit_side(side)
+        self.console_output.append(f"[BLOX_FRUITS] {res}")
+
+    def execute_admin_command(self):
+        query = self.admin_cmd_input.text().strip()
+        if not query:
+            return
+        self.admin_cmd_input.clear()
+        self.console_output.append(f"> {query}")
+
+        # Execute elevated admin diagnostic task
+        if query.lower() in ("clear", "cls"):
+            self.console_output.clear()
+            return
+        elif query.lower() == "ping":
+            self.console_output.append("[REPLY] Pong! All subroutines operational.")
+            return
+
+        worker = TaskExecutionWorker(query)
+        worker.task_completed.connect(lambda out: self.console_output.append(f"[RESULT] {out}\n"))
+        worker.start()
+
+# ============================================================
+# INTENT DISPATCHER & GEMINI WORKER
+# ============================================================
 class TaskExecutionWorker(QThread):
     task_completed = pyqtSignal(str)
 
@@ -500,14 +1284,25 @@ class TaskExecutionWorker(QThread):
     def run(self):
         p = self.prompt.strip().lower()
 
-        # PRIORITY 1: Side selection
+        # PRIORITY 1: Virtual Mouse & Hand Tracking Control
+        if any(w in p for w in ["start hand mouse", "enable hand tracking", "hand cursor", "start virtual mouse", "virtual mouse"]):
+            res = VirtualMouseManager.start()
+            self.task_completed.emit(res)
+            return
+
+        if any(w in p for w in ["stop hand mouse", "disable hand tracking", "stop virtual mouse", "stop hand control", "close hand"]):
+            res = VirtualMouseManager.stop()
+            self.task_completed.emit(res)
+            return
+
+        # PRIORITY 2: Blox Fruits Side Selection
         if ("marine" in p or "pirate" in p) and not ("what is" in p or "tell me" in p):
             side = "marine" if "marine" in p else "pirate"
             res = GameMacroController.choose_blox_fruit_side(side)
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 2: AFK controls
+        # PRIORITY 3: AFK Controls
         if any(w in p for w in ["stop macro", "stop afk", "pause macro", "disable afk", "stop farm"]):
             res = GameMacroController.stop_anti_afk()
             self.task_completed.emit(res)
@@ -518,7 +1313,7 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 3: Explicit game launch
+        # PRIORITY 4: Explicit Game Launch
         if any(k in p for k in ["open blox fruit", "join blox fruit", "start blox fruit", "open roblox", "start roblox"]):
             hwnd = find_window_by_title_substring("Roblox")
             if hwnd:
@@ -532,7 +1327,7 @@ class TaskExecutionWorker(QThread):
                     self.task_completed.emit(f"Launching Roblox: {game_name.title()}!")
                     return
 
-        # PRIORITY 4: Open or focus app
+        # PRIORITY 5: Open or Focus App
         if re.search(r'^(?:open|launch|start|run|switch to)\s+(.+)', p):
             target = re.sub(r'^(?:open|launch|start|run|switch to)\s+', '', p).strip()
             if "." in target and not target.endswith(".exe") and " " not in target:
@@ -543,7 +1338,7 @@ class TaskExecutionWorker(QThread):
                 self.task_completed.emit(res)
             return
 
-        # PRIORITY 5: Search Web / YouTube
+        # PRIORITY 6: Search Web / YouTube
         if re.search(r'^(?:search|lookup|google|find)\s+(.+)', p):
             query = re.sub(r'^(?:search|lookup|google|find)\s+', '', p).strip()
             if any(k in query for k in ["youtube", "yt"]):
@@ -554,7 +1349,7 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 6: Gemini Fallback with Sandboxed Directives
+        # PRIORITY 7: Gemini Fallback with Sandboxed Directives
         try:
             from google import genai
             from google.genai import types
@@ -600,8 +1395,9 @@ class TaskExecutionWorker(QThread):
         except Exception as e:
             self.task_completed.emit(f"Could not complete task: {e}")
 
-
-# ----------------- UI DIALOGS -----------------
+# ============================================================
+# AUDIT LOG DIALOG
+# ============================================================
 class AdminPanelDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -687,7 +1483,9 @@ class AdminPanelDialog(QDialog):
         AuditLogger.clear_logs()
         self.populate_logs()
 
-
+# ============================================================
+# LOGIN & AUTH DIALOG
+# ============================================================
 class AuthDialog(QDialog):
     def __init__(self, pc_name: str, win_user: str):
         super().__init__()
@@ -771,8 +1569,9 @@ class AuthDialog(QDialog):
             self.is_admin = False
             self.accept()
 
-
-# ----------------- DESKTOP SEARCH BAR & EXPANDED VIEW -----------------
+# ============================================================
+# DESKTOP SEARCH BAR & EXPANDED VIEW
+# ============================================================
 class GeminiDesktopAssistant(QMainWindow):
     def __init__(self, active_user: str, is_admin: bool, pc_name: str, win_user: str):
         super().__init__()
@@ -811,13 +1610,35 @@ class GeminiDesktopAssistant(QMainWindow):
         self.top_bar.addWidget(self.title_lbl)
         self.top_bar.addStretch()
 
+        # ONLY VISIBLE IF IS_ADMIN IS TRUE: Dedicated Admin Hub Button
         if self.is_admin:
-            self.admin_btn = QPushButton("🛡️")
-            self.admin_btn.setFixedSize(26, 22)
-            self.admin_btn.setToolTip("Admin Logs")
-            self.admin_btn.setStyleSheet("QPushButton { background: #111111; color: #8ab4f8; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #222222; }")
-            self.admin_btn.clicked.connect(lambda: AdminPanelDialog(self).exec())
-            self.top_bar.addWidget(self.admin_btn)
+            self.admin_hub_btn = QPushButton("⚡ Admin Hub")
+            self.admin_hub_btn.setFixedSize(94, 22)
+            self.admin_hub_btn.setToolTip("Open Separate Admin Workspace & Controls")
+            self.admin_hub_btn.setStyleSheet("""
+                QPushButton {
+                    background: #151820;
+                    color: #8ab4f8;
+                    border-radius: 6px;
+                    border: 1px solid #2b3a55;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #202635;
+                    color: #adc8ff;
+                    border-color: #8ab4f8;
+                }
+            """)
+            self.admin_hub_btn.clicked.connect(lambda: AdminWorkspaceDialog(self).exec())
+            self.top_bar.addWidget(self.admin_hub_btn)
+
+            self.admin_log_btn = QPushButton("🛡️")
+            self.admin_log_btn.setFixedSize(26, 22)
+            self.admin_log_btn.setToolTip("View Activity Log")
+            self.admin_log_btn.setStyleSheet("QPushButton { background: #111111; color: #8ab4f8; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #222222; }")
+            self.admin_log_btn.clicked.connect(lambda: AdminPanelDialog(self).exec())
+            self.top_bar.addWidget(self.admin_log_btn)
 
         self.mode_toggle_btn = QPushButton("▼")
         self.mode_toggle_btn.setFixedSize(26, 22)
@@ -837,7 +1658,7 @@ class GeminiDesktopAssistant(QMainWindow):
         exit_btn.setFixedSize(26, 22)
         exit_btn.setToolTip("Exit")
         exit_btn.setStyleSheet("QPushButton { background: #111111; color: #aaaaaa; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #b00020; color: white; }")
-        exit_btn.clicked.connect(QApplication.instance().quit)
+        exit_btn.clicked.connect(self.clean_exit)
         self.top_bar.addWidget(exit_btn)
 
         # Pure Pitch-Black Scroll Area & Viewport Styling
@@ -859,7 +1680,7 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.setContentsMargins(12, 4, 8, 4)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Search, open apps, blox fruit side, afk, or ask...")
+        self.input_field.setPlaceholderText("Search, hand mouse, blox fruit side, afk, or ask...")
         self.input_field.setFont(QFont("Segoe UI", 11))
         self.input_field.setStyleSheet("background: transparent; color: #ffffff; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
@@ -884,7 +1705,11 @@ class GeminiDesktopAssistant(QMainWindow):
         self.updater = AutoUpdater()
         self.updater.start()
 
-        self.append_bubble("assistant", f"Online, {self.active_user}! Auto-updater active. Triple-click bar to expand/shrink.")
+        self.append_bubble("assistant", f"Online, {self.active_user}! Type 'start virtual mouse' for touchless control, or open '⚡ Admin Hub' for direct operations.")
+
+    def clean_exit(self):
+        VirtualMouseManager.stop()
+        QApplication.instance().quit()
 
     def apply_mode_geometry(self):
         screen = QApplication.primaryScreen().geometry()
@@ -892,14 +1717,14 @@ class GeminiDesktopAssistant(QMainWindow):
             self.scroll.hide()
             self.title_lbl.setText("✦ Spark")
             self.mode_toggle_btn.setText("▼")
-            self.resize(560, 84)
-            self.move((screen.width() - 560) // 2, 16)
+            self.resize(600, 84)
+            self.move((screen.width() - 600) // 2, 16)
         else:
             self.scroll.show()
             self.title_lbl.setText(f"✦ Spark Assistant ({self.active_user})")
             self.mode_toggle_btn.setText("▲")
-            self.resize(700, 520)
-            self.move((screen.width() - 700) // 2, 40)
+            self.resize(740, 520)
+            self.move((screen.width() - 740) // 2, 40)
 
     def toggle_compact_mode(self):
         self.is_compact = not self.is_compact
@@ -948,7 +1773,7 @@ class GeminiDesktopAssistant(QMainWindow):
 
         self.input_field.clear()
 
-        if self.is_compact and not any(k in query.lower() for k in ["marine", "pirate", "afk", "stop"]):
+        if self.is_compact and not any(k in query.lower() for k in ["marine", "pirate", "afk", "stop", "mouse"]):
             self.toggle_compact_mode()
 
         self.append_bubble("user", query)
@@ -961,9 +1786,12 @@ class GeminiDesktopAssistant(QMainWindow):
     def on_task_finished(self, result_text: str):
         self.append_bubble("assistant", result_text)
 
-
-# ----------------- APPLICATION ENTRY POINT -----------------
+# ============================================================
+# APPLICATION ENTRY POINT (FREEZE SUPPORTED)
+# ============================================================
 if __name__ == "__main__":
+    mp.freeze_support()
+
     app = QApplication(sys.argv)
     pc_name = os.environ.get("COMPUTERNAME", "Unknown-PC")
     win_user = os.environ.get("USERNAME", "Unknown-User")
