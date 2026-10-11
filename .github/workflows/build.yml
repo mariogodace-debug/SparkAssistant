@@ -25,11 +25,11 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install PyQt6 google-genai pyinstaller
+          pip install pyinstaller PyQt6 google-genai python-pptx opencv-python mediapipe SpeechRecognition keyboard numpy
 
       - name: Compile Executable
         run: |
-          pyinstaller --noconsole --onefile --name "SparkAssistant" --clean main.py
+          pyinstaller --noconsole --onefile --name "SparkAssistant" --clean --collect-all mediapipe main.py
 
       - name: Auto-Publish Latest Release
         uses: softprops/action-gh-release@v2
