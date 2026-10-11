@@ -16,9 +16,10 @@ import webbrowser
 from pathlib import Path
 import ctypes
 from ctypes import wintypes
+import winreg
 
-from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QFont, QColor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QLineEdit, QLabel, 
     QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
@@ -27,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 # ----------------- CONFIGURATION -----------------
+APP_NAME = "SparkAssistant"
 GITHUB_REPO = "mariogodace-debug/SparkAssistant"
 
 # Base64-encoded key to bypass GitHub Push Protection scans
@@ -54,6 +56,25 @@ ROBLOX_EXPERIENCES = {
     "da hood": "2788229376",
     "doors": "6516141723",
 }
+
+# ----------------- AUTO-START WITH WINDOWS -----------------
+def enable_windows_startup():
+    """Adds the app to Windows Run Registry so it boots with the PC silently."""
+    try:
+        exe_path = sys.executable
+        if not exe_path.lower().endswith(".exe"):
+            return
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE
+        )
+        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}" --startup')
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
 
 # ----------------- WINDOWS API UTILITIES -----------------
 user32 = ctypes.windll.user32
@@ -85,7 +106,7 @@ def bring_window_to_front(hwnd):
     return True
 
 
-# ----------------- CONTINUOUS ZERO-TOUCH AUTO-UPDATER -----------------
+# ----------------- CONTINUOUS AUTO-UPDATER -----------------
 class AutoUpdater(QThread):
     def run(self):
         time.sleep(4)
@@ -221,8 +242,7 @@ class GameMacroController:
         if not hwnd:
             return "Roblox window was not found. Please make sure Roblox is running."
 
-        # Bring Roblox window to the true foreground and wait for render
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.ShowWindow(hwnd, 9)
         user32.SetForegroundWindow(hwnd)
         time.sleep(0.6)
 
@@ -231,8 +251,6 @@ class GameMacroController:
         w = rect.right - rect.left
         h = rect.bottom - rect.top
 
-        # Pirates are on the left (~35% width), Marines on the right (~65% width)
-        # Cards sit at ~55% vertical height
         if "marine" in side.lower():
             target_x = rect.left + int(w * 0.65)
             target_y = rect.top + int(h * 0.55)
@@ -240,12 +258,11 @@ class GameMacroController:
             target_x = rect.left + int(w * 0.35)
             target_y = rect.top + int(h * 0.55)
 
-        # Move mouse and simulate direct left click
         user32.SetCursorPos(target_x, target_y)
         time.sleep(0.1)
-        user32.mouse_event(0x0002, 0, 0, 0, 0)  # Left down
+        user32.mouse_event(0x0002, 0, 0, 0, 0)
         time.sleep(0.08)
-        user32.mouse_event(0x0004, 0, 0, 0, 0)  # Left up
+        user32.mouse_event(0x0004, 0, 0, 0, 0)
 
         return f"Focused Roblox and selected {side.title()}!"
 
@@ -265,19 +282,16 @@ class GameMacroController:
             time.sleep(2)
             while cls._active:
                 try:
-                    # Random small jump to bypass 20-min idle kick
                     subprocess.run(["powershell", "-NoProfile", "-Command", "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys(' ')"], capture_output=True)
                     time.sleep(random.uniform(0.3, 0.6))
-                    # Attack key 'z'
                     subprocess.run(["powershell", "-NoProfile", "-Command", "$wshell = New-Object -ComObject WScript.Shell; $wshell.SendKeys('z')"], capture_output=True)
-                    # Variable interval prevents pattern detection
                     time.sleep(random.uniform(4.0, 7.5))
                 except Exception:
                     break
 
         cls._thread = threading.Thread(target=loop, daemon=True)
         cls._thread.start()
-        return "Safe AFK Grinding started! Character will jump & attack at random intervals. Say 'stop afk' to finish."
+        return "Safe AFK Grinding started! Jumping and attacking at random intervals. Say 'stop afk' to finish."
 
     @classmethod
     def stop_anti_afk(cls) -> str:
@@ -350,7 +364,7 @@ class SystemAutomation:
             hwnd = find_window_by_title_substring(win_title)
             if hwnd:
                 bring_window_to_front(hwnd)
-                return f"{win_title} is already running. Brought to front."
+                return f"{win_title} is already open. Brought to front."
             subprocess.Popen(["cmd", "/c", "start", exe_cmd], shell=True)
             return f"Opening {clean.title()}."
 
@@ -449,7 +463,7 @@ class SystemAutomation:
         return "Task complete."
 
 
-# ----------------- INTENT DISPATCHER & GEMINI WORKER -----------------
+# ----------------- INTENT DISPATCHER & WORKER -----------------
 class TaskExecutionWorker(QThread):
     task_completed = pyqtSignal(str)
 
@@ -460,14 +474,14 @@ class TaskExecutionWorker(QThread):
     def run(self):
         p = self.prompt.strip().lower()
 
-        # PRIORITY 1: Blox Fruits Side Selection (Must run first so it doesn't trigger game restart)
+        # PRIORITY 1: Side selection
         if ("marine" in p or "pirate" in p) and not ("what is" in p or "tell me" in p):
             side = "marine" if "marine" in p else "pirate"
             res = GameMacroController.choose_blox_fruit_side(side)
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 2: AFK Macro Controls
+        # PRIORITY 2: AFK controls
         if any(w in p for w in ["stop macro", "stop afk", "pause macro", "disable afk", "stop farm"]):
             res = GameMacroController.stop_anti_afk()
             self.task_completed.emit(res)
@@ -478,7 +492,7 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 3: Explicit Launch / Open Roblox Game
+        # PRIORITY 3: Explicit game launch
         if any(k in p for k in ["open blox fruit", "join blox fruit", "start blox fruit", "open roblox", "start roblox"]):
             hwnd = find_window_by_title_substring("Roblox")
             if hwnd:
@@ -492,7 +506,7 @@ class TaskExecutionWorker(QThread):
                     self.task_completed.emit(f"Launching Roblox: {game_name.title()}!")
                     return
 
-        # PRIORITY 4: App Open or Focus (Avoids duplicates)
+        # PRIORITY 4: Open or focus app
         if re.search(r'^(?:open|launch|start|run|switch to)\s+(.+)', p):
             target = re.sub(r'^(?:open|launch|start|run|switch to)\s+', '', p).strip()
             if "." in target and not target.endswith(".exe") and " " not in target:
@@ -503,7 +517,7 @@ class TaskExecutionWorker(QThread):
                 self.task_completed.emit(res)
             return
 
-        # PRIORITY 5: Web Searches
+        # PRIORITY 5: Search Web / YouTube
         if re.search(r'^(?:search|lookup|google|find)\s+(.+)', p):
             query = re.sub(r'^(?:search|lookup|google|find)\s+', '', p).strip()
             if any(k in query for k in ["youtube", "yt"]):
@@ -514,7 +528,7 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 6: Gemini Fallback for Presentations and Conversation
+        # PRIORITY 6: Gemini Fallback
         try:
             from google import genai
             from google.genai import types
@@ -560,21 +574,21 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(f"Could not complete task: {e}")
 
 
-# ----------------- UI WINDOWS -----------------
+# ----------------- UI DIALOGS -----------------
 class AdminPanelDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Shield Admin Console - Activity & Device Monitor")
         self.resize(850, 480)
         self.setStyleSheet("""
-            QDialog { background-color: #121316; color: #e8eaed; font-family: 'Segoe UI'; }
-            QLabel { color: #a8c7fa; font-size: 13px; }
-            QLineEdit { background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 6px; padding: 6px; color: white; }
-            QTableWidget { background-color: #1a1b20; color: #e8eaed; gridline-color: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; }
-            QHeaderView::section { background-color: #24262c; color: #8ab4f8; padding: 6px; border: 1px solid rgba(255, 255, 255, 0.05); font-weight: bold; }
-            QPushButton { background-color: #2b303c; color: white; border-radius: 6px; padding: 6px 14px; font-size: 12px; border: 1px solid rgba(255, 255, 255, 0.15); }
-            QPushButton:hover { background-color: #3b4252; }
-            QPushButton#DangerBtn:hover { background-color: #d93025; }
+            QDialog { background-color: #000000; color: #ffffff; font-family: 'Segoe UI'; }
+            QLabel { color: #8ab4f8; font-size: 13px; }
+            QLineEdit { background: #0d0d0d; border: 1px solid #222222; border-radius: 6px; padding: 6px; color: white; }
+            QTableWidget { background-color: #080808; color: #ffffff; gridline-color: #1a1a1a; border: 1px solid #222222; border-radius: 8px; }
+            QHeaderView::section { background-color: #111111; color: #8ab4f8; padding: 6px; border: 1px solid #1a1a1a; font-weight: bold; }
+            QPushButton { background-color: #161616; color: white; border-radius: 6px; padding: 6px 14px; font-size: 12px; border: 1px solid #2a2a2a; }
+            QPushButton:hover { background-color: #242424; }
+            QPushButton#DangerBtn:hover { background-color: #990000; }
         """)
 
         layout = QVBoxLayout(self)
@@ -659,11 +673,12 @@ class AuthDialog(QDialog):
         self.setWindowTitle("Spark Assistant - Security Gate")
         self.setFixedSize(380, 360)
         self.setStyleSheet("""
-            QDialog { background-color: #17181c; color: #e8eaed; font-family: 'Segoe UI'; }
+            QDialog { background-color: #000000; color: #ffffff; font-family: 'Segoe UI'; border: 1px solid #1f1f1f; }
             QLabel { color: #e8eaed; font-size: 13px; }
-            QLineEdit { background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 8px; padding: 8px; color: white; }
+            QLineEdit { background: #0c0c0c; border: 1px solid #222222; border-radius: 8px; padding: 8px; color: white; }
             QRadioButton { color: #c4c7c5; }
-            QPushButton { background-color: #8ab4f8; color: #131314; border-radius: 8px; padding: 10px; font-weight: bold; }
+            QPushButton { background-color: #8ab4f8; color: #000000; border-radius: 8px; padding: 10px; font-weight: bold; }
+            QPushButton:hover { background-color: #adc8ff; }
         """)
 
         layout = QVBoxLayout(self)
@@ -671,7 +686,7 @@ class AuthDialog(QDialog):
         layout.setSpacing(12)
 
         info_lbl = QLabel(f"<b>Device:</b> {self.pc_name} ({self.win_user})")
-        info_lbl.setStyleSheet("color: #a8c7fa; font-size: 12px;")
+        info_lbl.setStyleSheet("color: #8ab4f8; font-size: 12px;")
         layout.addWidget(info_lbl)
 
         mode_layout = QHBoxLayout()
@@ -730,6 +745,7 @@ class AuthDialog(QDialog):
             self.accept()
 
 
+# ----------------- MAIN DESKTOP BAR & EXPANDED WINDOW -----------------
 class GeminiDesktopAssistant(QMainWindow):
     def __init__(self, active_user: str, is_admin: bool, pc_name: str, win_user: str):
         super().__init__()
@@ -738,38 +754,71 @@ class GeminiDesktopAssistant(QMainWindow):
         self.pc_name = pc_name
         self.win_user = win_user
 
+        self.is_compact = True
+        self.click_times = []
+
+        # Borderless, Always on top, Taskbar tool window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.resize(720, 530)
 
-        container = QWidget(self)
-        container.setObjectName("Card")
-        container.setStyleSheet("QWidget#Card { background-color: rgba(23, 24, 28, 245); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px; }")
+        # Main Central Container
+        self.container = QWidget(self)
+        self.container.setObjectName("Card")
+        self.container.setStyleSheet("""
+            QWidget#Card {
+                background-color: #000000;
+                border: 1px solid #1c1c1f;
+                border-radius: 18px;
+            }
+        """)
 
-        main_layout = QVBoxLayout(container)
-        main_layout.setContentsMargins(20, 16, 20, 18)
-        main_layout.setSpacing(12)
+        self.main_layout = QVBoxLayout(self.container)
+        self.main_layout.setContentsMargins(14, 10, 14, 10)
+        self.main_layout.setSpacing(8)
 
-        top_bar = QHBoxLayout()
-        title = QLabel(f"✦ Private Assistant ({self.active_user})")
-        title.setFont(QFont("Segoe UI", 11, QFont.Weight.DemiBold))
-        title.setStyleSheet("color: #a8c7fa;")
-        top_bar.addWidget(title)
-        top_bar.addStretch()
+        # Top Bar (Header & Controls)
+        self.top_bar = QHBoxLayout()
+        self.top_bar.setContentsMargins(4, 2, 4, 2)
+
+        self.title_lbl = QLabel(f"✦ Spark ({self.active_user})")
+        self.title_lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.DemiBold))
+        self.title_lbl.setStyleSheet("color: #8ab4f8;")
+        self.top_bar.addWidget(self.title_lbl)
+        self.top_bar.addStretch()
 
         if self.is_admin:
-            admin_btn = QPushButton("🛡️ Admin Panel")
-            admin_btn.setFixedSize(110, 26)
-            admin_btn.setStyleSheet("QPushButton { background: rgba(138, 180, 248, 0.15); color: #8ab4f8; border-radius: 12px; font-size: 11px; font-weight: bold; }")
-            admin_btn.clicked.connect(lambda: AdminPanelDialog(self).exec())
-            top_bar.addWidget(admin_btn)
+            self.admin_btn = QPushButton("🛡️")
+            self.admin_btn.setFixedSize(26, 22)
+            self.admin_btn.setToolTip("Admin Logs")
+            self.admin_btn.setStyleSheet("QPushButton { background: #111111; color: #8ab4f8; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #222222; }")
+            self.admin_btn.clicked.connect(lambda: AdminPanelDialog(self).exec())
+            self.top_bar.addWidget(self.admin_btn)
 
+        # Expand / Shrink toggle button
+        self.mode_toggle_btn = QPushButton("▼")
+        self.mode_toggle_btn.setFixedSize(26, 22)
+        self.mode_toggle_btn.setToolTip("Toggle Compact Search Bar / Full View")
+        self.mode_toggle_btn.setStyleSheet("QPushButton { background: #111111; color: #aaaaaa; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #222222; color: white; }")
+        self.mode_toggle_btn.clicked.connect(self.toggle_compact_mode)
+        self.top_bar.addWidget(self.mode_toggle_btn)
+
+        # Minimize to taskbar / tray button
+        min_btn = QPushButton("—")
+        min_btn.setFixedSize(26, 22)
+        min_btn.setToolTip("Minimize")
+        min_btn.setStyleSheet("QPushButton { background: #111111; color: #aaaaaa; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #222222; color: white; }")
+        min_btn.clicked.connect(self.showMinimized)
+        self.top_bar.addWidget(min_btn)
+
+        # Close App Button
         exit_btn = QPushButton("✕")
-        exit_btn.setFixedSize(28, 24)
-        exit_btn.setStyleSheet("QPushButton { background: rgba(255, 255, 255, 0.08); color: #b0b0b8; border-radius: 12px; } QPushButton:hover { background: #ff453a; color: white; }")
+        exit_btn.setFixedSize(26, 22)
+        exit_btn.setToolTip("Exit")
+        exit_btn.setStyleSheet("QPushButton { background: #111111; color: #aaaaaa; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #b00020; color: white; }")
         exit_btn.clicked.connect(QApplication.instance().quit)
-        top_bar.addWidget(exit_btn)
+        self.top_bar.addWidget(exit_btn)
 
+        # Scroll Area for Chat History (Visible in Expanded Mode)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -780,60 +829,96 @@ class GeminiDesktopAssistant(QMainWindow):
         self.chat_layout.addStretch()
         self.scroll.setWidget(self.chat_container)
 
-        self.append_bubble("assistant", f"Ready, {self.active_user}! Say 'choose marine' or 'choose pirate', 'start afk' to farm, open apps without duplicates, or create presentations.")
-
-        input_container = QWidget()
-        input_container.setStyleSheet("background: rgba(36, 38, 44, 240); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 20px;")
-        input_layout = QHBoxLayout(input_container)
-        input_layout.setContentsMargins(16, 8, 12, 8)
+        # Input Search Box
+        self.input_container = QWidget()
+        self.input_container.setStyleSheet("background: #080808; border: 1px solid #1a1a1a; border-radius: 14px;")
+        input_layout = QHBoxLayout(self.input_container)
+        input_layout.setContentsMargins(12, 4, 8, 4)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Choose marine/pirate, start afk, open apps, or ask a question...")
-        self.input_field.setFont(QFont("Segoe UI", 13))
-        self.input_field.setStyleSheet("background: transparent; color: #f1f3f4; border: none;")
+        self.input_field.setPlaceholderText("Search, open apps, blox fruit side, afk, or ask...")
+        self.input_field.setFont(QFont("Segoe UI", 11))
+        self.input_field.setStyleSheet("background: transparent; color: #ffffff; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
 
         send_btn = QPushButton("↵")
-        send_btn.setFixedSize(30, 30)
-        send_btn.setStyleSheet("QPushButton { background: #8ab4f8; color: #1e1f20; font-weight: bold; border-radius: 15px; }")
+        send_btn.setFixedSize(26, 26)
+        send_btn.setStyleSheet("QPushButton { background: #8ab4f8; color: #000000; font-weight: bold; border-radius: 13px; } QPushButton:hover { background: #adc8ff; }")
         send_btn.clicked.connect(self.send_prompt)
 
         input_layout.addWidget(self.input_field)
         input_layout.addWidget(send_btn)
 
-        main_layout.addLayout(top_bar)
-        main_layout.addWidget(self.scroll, 1)
-        main_layout.addWidget(input_container)
+        # Assemble UI Layout
+        self.main_layout.addLayout(self.top_bar)
+        self.main_layout.addWidget(self.scroll, 1)
+        self.main_layout.addWidget(self.input_container)
 
-        self.setCentralWidget(container)
+        self.setCentralWidget(self.container)
 
-        screen = QApplication.primaryScreen().geometry()
-        self.move((screen.width() - self.width()) // 2, int(screen.height() * 0.16))
+        # Start in sleek compact search bar mode at top center
+        self.apply_mode_geometry()
+
         self.drag_pos = QPoint()
-
         self.updater = AutoUpdater()
         self.updater.start()
 
+        self.append_bubble("assistant", f"Online, {self.active_user}! Triple-click bar to expand/shrink.")
+
+    # ----------------- COMPACT / EXPANDED MODES -----------------
+    def apply_mode_geometry(self):
+        screen = QApplication.primaryScreen().geometry()
+        if self.is_compact:
+            self.scroll.hide()
+            self.title_lbl.setText("✦ Spark")
+            self.mode_toggle_btn.setText("▼")
+            self.resize(560, 84)
+            # Dock horizontally centered right near the top of screen
+            self.move((screen.width() - 560) // 2, 16)
+        else:
+            self.scroll.show()
+            self.title_lbl.setText(f"✦ Spark Assistant ({self.active_user})")
+            self.mode_toggle_btn.setText("▲")
+            self.resize(700, 520)
+            self.move((screen.width() - 700) // 2, 40)
+
+    def toggle_compact_mode(self):
+        self.is_compact = not self.is_compact
+        self.apply_mode_geometry()
+
+    # ----------------- TRIPLE CLICK DETECTION & DRAGGING -----------------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            now = time.time()
+            self.click_times.append(now)
+            # Retain clicks within the last 0.6 seconds
+            self.click_times = [t for t in self.click_times if now - t <= 0.6]
+
+            # Detect triple click
+            if len(self.click_times) >= 3:
+                self.click_times.clear()
+                self.toggle_compact_mode()
+                return
+
             self.drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, e):
         if e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self.drag_pos)
 
+    # ----------------- CHAT MESSAGES & DISPATCH -----------------
     def append_bubble(self, role: str, text: str):
         row = QHBoxLayout()
         bubble = QLabel(text)
         bubble.setWordWrap(True)
-        bubble.setFont(QFont("Segoe UI", 11))
+        bubble.setFont(QFont("Segoe UI", 10))
 
         if role == "user":
-            bubble.setStyleSheet("background-color: #2b303c; color: #e8eaed; padding: 10px 14px; border-radius: 14px;")
+            bubble.setStyleSheet("background-color: #121212; color: #ffffff; padding: 8px 12px; border-radius: 12px; border: 1px solid #222;")
             row.addStretch()
             row.addWidget(bubble)
         else:
-            bubble.setStyleSheet("background-color: rgba(255, 255, 255, 0.05); color: #d2e3fc; padding: 10px 14px; border-radius: 14px; border: 1px solid rgba(138, 180, 248, 0.25);")
+            bubble.setStyleSheet("background-color: #050505; color: #8ab4f8; padding: 8px 12px; border-radius: 12px; border: 1px solid #1f1f1f;")
             row.addWidget(bubble)
             row.addStretch()
 
@@ -847,8 +932,12 @@ class GeminiDesktopAssistant(QMainWindow):
             return
 
         self.input_field.clear()
-        self.append_bubble("user", query)
 
+        # If sent while in compact mode, auto-expand to show response
+        if self.is_compact and not any(k in query.lower() for k in ["marine", "pirate", "afk", "stop"]):
+            self.toggle_compact_mode()
+
+        self.append_bubble("user", query)
         AuditLogger.log(self.active_user, self.pc_name, self.win_user, query, "TASK_TRIGGERED")
 
         self.worker = TaskExecutionWorker(query)
@@ -859,11 +948,14 @@ class GeminiDesktopAssistant(QMainWindow):
         self.append_bubble("assistant", result_text)
 
 
-# ----------------- APPLICATION ENTRY POINT -----------------
+# ----------------- ENTRY POINT -----------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     pc_name = os.environ.get("COMPUTERNAME", "Unknown-PC")
     win_user = os.environ.get("USERNAME", "Unknown-User")
+
+    # Set up auto-start with Windows in Registry
+    enable_windows_startup()
 
     auth = AuthDialog(pc_name, win_user)
     if auth.exec() == QDialog.DialogCode.Accepted:
