@@ -18,8 +18,8 @@ import ctypes
 from ctypes import wintypes
 import winreg
 
-from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import Qt, QPoint, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QLineEdit, QLabel, 
     QVBoxLayout, QHBoxLayout, QWidget, QPushButton,
@@ -59,7 +59,7 @@ ROBLOX_EXPERIENCES = {
 
 # ----------------- AUTO-START WITH WINDOWS -----------------
 def enable_windows_startup():
-    """Adds the app to Windows Run Registry so it boots with the PC silently."""
+    """Adds the app to current user startup registry (Low Privilege / Non-Admin)."""
     try:
         exe_path = sys.executable
         if not exe_path.lower().endswith(".exe"):
@@ -70,7 +70,7 @@ def enable_windows_startup():
             0,
             winreg.KEY_SET_VALUE
         )
-        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}" --startup')
+        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
         winreg.CloseKey(key)
     except Exception:
         pass
@@ -106,32 +106,38 @@ def bring_window_to_front(hwnd):
     return True
 
 
-# ----------------- CONTINUOUS AUTO-UPDATER -----------------
+# ----------------- CONTINUOUS SELF-UPGRADE ENGINE -----------------
 class AutoUpdater(QThread):
+    """
+    Checks GitHub Releases periodically.
+    If a new version is pushed, it silently downloads and replaces the binary.
+    """
     def run(self):
-        time.sleep(4)
-        try:
-            api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/latest"
-            req = urllib.request.Request(api_url, headers={"User-Agent": "SparkAssistant-AutoUpdater"})
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                for asset in data.get("assets", []):
-                    if asset.get("name") == "SparkAssistant.exe":
-                        remote_stamp = asset.get("updated_at")
-                        download_url = asset.get("browser_download_url")
+        while True:
+            try:
+                time.sleep(10)  # Initial wait, then checks periodically
+                api_url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/tags/latest"
+                req = urllib.request.Request(api_url, headers={"User-Agent": "SparkAssistant-AutoUpdater"})
+                with urllib.request.urlopen(req, timeout=8) as response:
+                    data = json.loads(response.read().decode())
+                    for asset in data.get("assets", []):
+                        if asset.get("name") == "SparkAssistant.exe":
+                            remote_stamp = asset.get("updated_at")
+                            download_url = asset.get("browser_download_url")
 
-                        local_stamp = ""
-                        if VERSION_STAMP_FILE.exists():
-                            try:
-                                local_stamp = VERSION_STAMP_FILE.read_text(encoding="utf-8").strip()
-                            except Exception:
-                                pass
+                            local_stamp = ""
+                            if VERSION_STAMP_FILE.exists():
+                                try:
+                                    local_stamp = VERSION_STAMP_FILE.read_text(encoding="utf-8").strip()
+                                except Exception:
+                                    pass
 
-                        if remote_stamp and remote_stamp != local_stamp:
-                            self.silent_replace_and_restart(download_url, remote_stamp)
-                            return
-        except Exception:
-            pass
+                            if remote_stamp and remote_stamp != local_stamp:
+                                self.silent_replace_and_restart(download_url, remote_stamp)
+                                return
+            except Exception:
+                pass
+            time.sleep(300)  # Check every 5 minutes in background
 
     def silent_replace_and_restart(self, download_url: str, new_stamp: str):
         try:
@@ -142,6 +148,7 @@ class AutoUpdater(QThread):
             urllib.request.urlretrieve(download_url, new_exe)
             VERSION_STAMP_FILE.write_text(new_stamp, encoding="utf-8")
 
+            # Batch script handles swap safely without file-lock collisions
             bat_path = os.path.join(temp_dir, "silent_swap.bat")
             with open(bat_path, "w") as f:
                 f.write(f"""@echo off
@@ -240,7 +247,7 @@ class GameMacroController:
     def choose_blox_fruit_side(cls, side: str) -> str:
         hwnd = find_window_by_title_substring("Roblox")
         if not hwnd:
-            return "Roblox window was not found. Please make sure Roblox is running."
+            return "Roblox window was not found. Please make sure Roblox is open."
 
         user32.ShowWindow(hwnd, 9)
         user32.SetForegroundWindow(hwnd)
@@ -269,7 +276,7 @@ class GameMacroController:
     @classmethod
     def start_anti_afk(cls) -> str:
         if cls._active:
-            return "AFK macro is already running. Say 'stop afk' to halt it."
+            return "AFK macro is already running. Say 'stop afk' to cancel."
 
         hwnd = find_window_by_title_substring("Roblox")
         if hwnd:
@@ -291,17 +298,17 @@ class GameMacroController:
 
         cls._thread = threading.Thread(target=loop, daemon=True)
         cls._thread.start()
-        return "Safe AFK Grinding started! Jumping and attacking at random intervals. Say 'stop afk' to finish."
+        return "Safe AFK Grinding active! Say 'stop afk' to cancel."
 
     @classmethod
     def stop_anti_afk(cls) -> str:
         if not cls._active:
-            return "No AFK macro is currently running."
+            return "No AFK macro is running."
         cls._active = False
-        return "AFK macro stopped. Controls fully released."
+        return "AFK macro stopped."
 
 
-# ----------------- SYSTEM AUTOMATION TOOLS -----------------
+# ----------------- SYSTEM AUTOMATION TOOLS & HARD SANDBOX -----------------
 class SystemAutomation:
     APP_ALIASES = {
         "powerpoint": ("powerpnt.exe", "PowerPoint"),
@@ -315,16 +322,18 @@ class SystemAutomation:
         "spotify": (os.path.expandvars(r"%APPDATA%\Spotify\Spotify.exe"), "Spotify")
     }
 
-    BLOCKED_ADMIN_TERMS = [
-        "format", "diskpart", "bcdedit", "reg delete", "net user", 
-        "takeown", "icacls", "del /f /s /q c:\\", "rmdir /s /q c:\\", 
-        "shutdown", "restart-computer", "powershell -executionpolicy bypass"
+    # Strict Sandbox: Denies all invasive system controls
+    BLOCKED_TERMS = [
+        "format", "diskpart", "bcdedit", "reg delete", "reg add", "net user",
+        "takeown", "icacls", "del /f", "rmdir", "shutdown", "restart-computer",
+        "powershell -executionpolicy bypass", "cmd.exe /c del", "vssadmin",
+        "wbadmin", "attrib -r -s", "taskkill /f /im explorer.exe", "disable-netadapter"
     ]
 
     @classmethod
-    def is_safe_command(cls, cmd: str) -> bool:
-        c_lower = cmd.lower()
-        return not any(blocked in c_lower for blocked in cls.BLOCKED_ADMIN_TERMS)
+    def is_safe_action(cls, text: str) -> bool:
+        t_low = text.lower()
+        return not any(term in t_low for term in cls.BLOCKED_TERMS)
 
     @classmethod
     def open_private_browser(cls, target_url: str):
@@ -354,10 +363,13 @@ class SystemAutomation:
     def open_or_focus_app(cls, app_name: str) -> str:
         clean = app_name.strip().lower()
 
+        if not cls.is_safe_action(clean):
+            return "Action blocked: System control command denied by safety sandbox."
+
         hwnd = find_window_by_title_substring(clean)
         if hwnd:
             bring_window_to_front(hwnd)
-            return f"{app_name.title()} is already running. Brought to front."
+            return f"{app_name.title()} is already open. Brought to front."
 
         if clean in cls.APP_ALIASES:
             exe_cmd, win_title = cls.APP_ALIASES[clean]
@@ -440,8 +452,8 @@ class SystemAutomation:
     @classmethod
     def system_command(cls, action_type: str, detail: str = "") -> str:
         action_type = action_type.lower()
-        if not cls.is_safe_command(detail):
-            return "Action blocked: Administrative commands are disabled."
+        if not cls.is_safe_action(detail):
+            return "Command rejected: Full system control / admin operations are restricted."
 
         if action_type == "lock_pc":
             subprocess.Popen("rundll32.exe user32.dll,LockWorkStation", shell=True)
@@ -528,20 +540,21 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 6: Gemini Fallback
+        # PRIORITY 6: Gemini Fallback with Sandboxed Directives
         try:
             from google import genai
             from google.genai import types
 
             client = genai.Client(api_key=API_KEY)
             system_prompt = (
-                "You are an isolated private desktop assistant.\n"
-                "Rules:\n"
-                "1. If asked to make a presentation or PowerPoint, output ONLY JSON: {\"action\": \"create_ppt\", \"topic\": \"...\", \"slides\": [{\"title\": \"...\", \"points\": [\"...\", \"...\"]}]}\n"
-                "2. If asked to open/switch an app, output ONLY JSON: {\"action\": \"open_app\", \"parameter\": \"...\"}\n"
-                "3. Never perform admin or destructive operations.\n"
-                "4. For regular queries or conversations, answer directly and concisely.\n"
-                "When outputting JSON, return raw JSON only."
+                "You are an isolated private desktop assistant operating inside a strictly sandboxed user environment.\n"
+                "CRITICAL CONSTRAINTS:\n"
+                "1. You have ZERO administrator or root control over the user's PC.\n"
+                "2. You CANNOT execute shell commands, delete files, format drives, modify system settings, or install unauthorized software.\n"
+                "3. If asked to make a PowerPoint presentation, respond ONLY with JSON: {\"action\": \"create_ppt\", \"topic\": \"...\", \"slides\": [{\"title\": \"...\", \"points\": [\"...\", \"...\"]}]}\n"
+                "4. If asked to switch or open an allowed desktop application, output ONLY JSON: {\"action\": \"open_app\", \"parameter\": \"...\"}\n"
+                "5. For all other queries, answer directly, helpful, and concisely.\n"
+                "Return raw output with no markdown codeblocks for JSON."
             )
 
             res = client.models.generate_content(
@@ -745,7 +758,7 @@ class AuthDialog(QDialog):
             self.accept()
 
 
-# ----------------- MAIN DESKTOP BAR & EXPANDED WINDOW -----------------
+# ----------------- DESKTOP SEARCH BAR & EXPANDED VIEW -----------------
 class GeminiDesktopAssistant(QMainWindow):
     def __init__(self, active_user: str, is_admin: bool, pc_name: str, win_user: str):
         super().__init__()
@@ -757,17 +770,15 @@ class GeminiDesktopAssistant(QMainWindow):
         self.is_compact = True
         self.click_times = []
 
-        # Borderless, Always on top, Taskbar tool window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        # Main Central Container
         self.container = QWidget(self)
         self.container.setObjectName("Card")
         self.container.setStyleSheet("""
             QWidget#Card {
                 background-color: #000000;
-                border: 1px solid #1c1c1f;
+                border: 1px solid #1a1a1c;
                 border-radius: 18px;
             }
         """)
@@ -776,7 +787,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.main_layout.setContentsMargins(14, 10, 14, 10)
         self.main_layout.setSpacing(8)
 
-        # Top Bar (Header & Controls)
+        # Top Bar
         self.top_bar = QHBoxLayout()
         self.top_bar.setContentsMargins(4, 2, 4, 2)
 
@@ -794,15 +805,13 @@ class GeminiDesktopAssistant(QMainWindow):
             self.admin_btn.clicked.connect(lambda: AdminPanelDialog(self).exec())
             self.top_bar.addWidget(self.admin_btn)
 
-        # Expand / Shrink toggle button
         self.mode_toggle_btn = QPushButton("▼")
         self.mode_toggle_btn.setFixedSize(26, 22)
-        self.mode_toggle_btn.setToolTip("Toggle Compact Search Bar / Full View")
+        self.mode_toggle_btn.setToolTip("Toggle Search Bar / Full View")
         self.mode_toggle_btn.setStyleSheet("QPushButton { background: #111111; color: #aaaaaa; border-radius: 6px; border: 1px solid #222222; } QPushButton:hover { background: #222222; color: white; }")
         self.mode_toggle_btn.clicked.connect(self.toggle_compact_mode)
         self.top_bar.addWidget(self.mode_toggle_btn)
 
-        # Minimize to taskbar / tray button
         min_btn = QPushButton("—")
         min_btn.setFixedSize(26, 22)
         min_btn.setToolTip("Minimize")
@@ -810,7 +819,6 @@ class GeminiDesktopAssistant(QMainWindow):
         min_btn.clicked.connect(self.showMinimized)
         self.top_bar.addWidget(min_btn)
 
-        # Close App Button
         exit_btn = QPushButton("✕")
         exit_btn.setFixedSize(26, 22)
         exit_btn.setToolTip("Exit")
@@ -818,7 +826,6 @@ class GeminiDesktopAssistant(QMainWindow):
         exit_btn.clicked.connect(QApplication.instance().quit)
         self.top_bar.addWidget(exit_btn)
 
-        # Scroll Area for Chat History (Visible in Expanded Mode)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -829,7 +836,6 @@ class GeminiDesktopAssistant(QMainWindow):
         self.chat_layout.addStretch()
         self.scroll.setWidget(self.chat_container)
 
-        # Input Search Box
         self.input_container = QWidget()
         self.input_container.setStyleSheet("background: #080808; border: 1px solid #1a1a1a; border-radius: 14px;")
         input_layout = QHBoxLayout(self.input_container)
@@ -849,23 +855,20 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.addWidget(self.input_field)
         input_layout.addWidget(send_btn)
 
-        # Assemble UI Layout
         self.main_layout.addLayout(self.top_bar)
         self.main_layout.addWidget(self.scroll, 1)
         self.main_layout.addWidget(self.input_container)
 
         self.setCentralWidget(self.container)
 
-        # Start in sleek compact search bar mode at top center
         self.apply_mode_geometry()
 
         self.drag_pos = QPoint()
         self.updater = AutoUpdater()
         self.updater.start()
 
-        self.append_bubble("assistant", f"Online, {self.active_user}! Triple-click bar to expand/shrink.")
+        self.append_bubble("assistant", f"Online, {self.active_user}! Auto-updater active. Triple-click bar to expand/shrink.")
 
-    # ----------------- COMPACT / EXPANDED MODES -----------------
     def apply_mode_geometry(self):
         screen = QApplication.primaryScreen().geometry()
         if self.is_compact:
@@ -873,7 +876,6 @@ class GeminiDesktopAssistant(QMainWindow):
             self.title_lbl.setText("✦ Spark")
             self.mode_toggle_btn.setText("▼")
             self.resize(560, 84)
-            # Dock horizontally centered right near the top of screen
             self.move((screen.width() - 560) // 2, 16)
         else:
             self.scroll.show()
@@ -886,15 +888,12 @@ class GeminiDesktopAssistant(QMainWindow):
         self.is_compact = not self.is_compact
         self.apply_mode_geometry()
 
-    # ----------------- TRIPLE CLICK DETECTION & DRAGGING -----------------
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             now = time.time()
             self.click_times.append(now)
-            # Retain clicks within the last 0.6 seconds
             self.click_times = [t for t in self.click_times if now - t <= 0.6]
 
-            # Detect triple click
             if len(self.click_times) >= 3:
                 self.click_times.clear()
                 self.toggle_compact_mode()
@@ -906,7 +905,6 @@ class GeminiDesktopAssistant(QMainWindow):
         if e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self.drag_pos)
 
-    # ----------------- CHAT MESSAGES & DISPATCH -----------------
     def append_bubble(self, role: str, text: str):
         row = QHBoxLayout()
         bubble = QLabel(text)
@@ -933,7 +931,6 @@ class GeminiDesktopAssistant(QMainWindow):
 
         self.input_field.clear()
 
-        # If sent while in compact mode, auto-expand to show response
         if self.is_compact and not any(k in query.lower() for k in ["marine", "pirate", "afk", "stop"]):
             self.toggle_compact_mode()
 
@@ -948,13 +945,12 @@ class GeminiDesktopAssistant(QMainWindow):
         self.append_bubble("assistant", result_text)
 
 
-# ----------------- ENTRY POINT -----------------
+# ----------------- APPLICATION ENTRY POINT -----------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     pc_name = os.environ.get("COMPUTERNAME", "Unknown-PC")
     win_user = os.environ.get("USERNAME", "Unknown-User")
 
-    # Set up auto-start with Windows in Registry
     enable_windows_startup()
 
     auth = AuthDialog(pc_name, win_user)
