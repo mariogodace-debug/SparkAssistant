@@ -134,19 +134,24 @@ def bring_window_to_front(hwnd):
     return True
 
 # ============================================================
-# APP CONFIGURATION
+# APP CONFIGURATION & PORTABLE PATH RESOLUTION
 # ============================================================
 APP_NAME = "SparkAssistant"
 GITHUB_REPO = "mariogodace-debug/SparkAssistant"
 
 ADMIN_USERNAME = "shadow"
 ADMIN_DEFAULT_PASS = "Mann@2041986"
-
 MAX_LOG_ENTRIES = 1000
-BASE_DIR = Path.home() / "Desktop"
-LOG_FILE_PATH = BASE_DIR / "DeskAssistant_activity_log.txt"
-USER_DB_PATH = Path(__file__).resolve().parent / "users_db.json"
-KNOWLEDGE_DB_PATH = Path(__file__).resolve().parent / "knowledge.db"
+
+# Portable base directory: saves everything on the pendrive next to the executable
+if getattr(sys, 'frozen', False):
+    PORTABLE_DIR = Path(sys.executable).resolve().parent
+else:
+    PORTABLE_DIR = Path(__file__).resolve().parent
+
+LOG_FILE_PATH = PORTABLE_DIR / "DeskAssistant_activity_log.txt"
+USER_DB_PATH = PORTABLE_DIR / "users_db.json"
+KNOWLEDGE_DB_PATH = PORTABLE_DIR / "knowledge.db"
 VERSION_STAMP_FILE = Path(tempfile.gettempdir()) / "spark_version.txt"
 
 ROBLOX_EXPERIENCES = {
@@ -162,24 +167,8 @@ ROBLOX_EXPERIENCES = {
     "doors": "6516141723",
 }
 
-def enable_windows_startup():
-    try:
-        exe_path = sys.executable
-        if not exe_path.lower().endswith(".exe"):
-            return
-        key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            r"Software\Microsoft\Windows\CurrentVersion\Run",
-            0,
-            winreg.KEY_SET_VALUE
-        )
-        winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, f'"{exe_path}"')
-        winreg.CloseKey(key)
-    except Exception:
-        pass
-
 # ============================================================
-# LOCAL KNOWLEDGE ENGINE (REPLACES GEMINI)
+# EXPANDED OFFLINE SQLITE KNOWLEDGE ENGINE
 # ============================================================
 class KnowledgeDatabase:
     @classmethod
@@ -194,21 +183,46 @@ class KnowledgeDatabase:
                 response TEXT
             )
         """)
-        # Populate starter knowledge base if empty
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_keywords ON knowledge(keywords)")
+
         cursor.execute("SELECT COUNT(*) FROM knowledge")
         count = cursor.fetchone()[0]
+
         if count == 0:
             starter_data = [
-                ("identity", "who are you what is your name sparkassistant spark", 
-                 "I am SparkAssistant, your local autonomous desktop companion and task automator."),
-                ("capabilities", "what can you do help features commands", 
-                 "I can control apps, run Roblox macros, launch Virtual Mouse Pro, create PowerPoint decks, search offline knowledge, and run system tasks."),
-                ("blox fruits", "blox fruits marine pirate fruits guide sea", 
-                 "Blox Fruits is an open-world anime RPG on Roblox. You can automate team selection by asking me 'marine' or 'pirate', or use 'start afk'."),
-                ("virtual mouse", "how does virtual mouse work touchless gestures hand control", 
-                 "Virtual Mouse uses computer vision: index finger moves the cursor, pinch thumb to click, pinky up to right click, and two fingers to scroll."),
-                ("math", "how to calculate math formulas equation", 
-                 "You can enter math equations directly into the search bar, like '25 * 40' or 'sqrt(144)'.")
+                # System & Identity
+                ("identity", "who are you what is your name sparkassistant spark assistant", 
+                 "I am SparkAssistant, your local autonomous offline desktop intelligence and system companion."),
+                ("capabilities", "what can you do help features commands manual", 
+                 "I can control windows, launch Roblox, select teams, run safe AFK farming, execute touchless Virtual Mouse gestures, calculate math, and answer queries completely offline."),
+                
+                # Roblox Knowledge
+                ("blox fruits", "blox fruits marine pirate fruits guide sea devil fruit", 
+                 "Blox Fruits is a Roblox RPG. Type 'marine' or 'pirate' to auto-focus and join your crew, or type 'start afk' to enable anti-disconnect automation."),
+                ("devil fruits", "devil fruits blox fruit tier list best fruit light dough buddha leopard dragon", 
+                 "Buddha is best for leveling and grinding. Kitsune, Dough, and Leopard are top-tier for PvP."),
+                
+                # Virtual Mouse Controls
+                ("virtual mouse", "virtual mouse hand tracking gestures camera touchless control", 
+                 "Virtual Mouse Pro uses your camera: Index finger directs cursor, thumb tap clicks, pinky finger right-clicks, and two fingers scroll."),
+                
+                # Offline Tech & OS Shortcuts
+                ("task manager", "how to open task manager shortcut", 
+                 "Press Ctrl + Shift + Esc on your keyboard to instantly open Task Manager on Windows."),
+                ("screenshot", "how to take screenshot shortcut snipping tool", 
+                 "Press Win + Shift + S to launch the Windows Snipping Tool snippet selector."),
+                ("lock pc", "how to lock pc shortcut", 
+                 "Press Win + L or type 'lock pc' directly in SparkAssistant."),
+                ("ip address", "how to check ip address network command", 
+                 "Open Command Prompt and run 'ipconfig' to view your local IP and network adapters."),
+                
+                # General Science & Knowledge
+                ("water", "formula of water chemical composition", 
+                 "The chemical formula for water is H2O (two hydrogen atoms bonded to one oxygen atom)."),
+                ("speed of light", "speed of light physics c vacuum", 
+                 "The speed of light in a vacuum is approximately 299,792,458 meters per second (approx 300,000 km/s)."),
+                ("photosynthesis", "what is photosynthesis plants biology", 
+                 "Photosynthesis is the process by which green plants and organisms convert sunlight, water, and carbon dioxide into oxygen and chemical energy (glucose).")
             ]
             cursor.executemany("INSERT INTO knowledge (topic, keywords, response) VALUES (?, ?, ?)", starter_data)
             conn.commit()
@@ -224,8 +238,6 @@ class KnowledgeDatabase:
         try:
             conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
             cursor = conn.cursor()
-            
-            # Simple keyword overlap query
             cursor.execute("SELECT topic, keywords, response FROM knowledge")
             rows = cursor.fetchall()
             conn.close()
@@ -243,20 +255,19 @@ class KnowledgeDatabase:
             if max_score > 0:
                 return best_match
 
-            # Try mathematical evaluation if prompt is an arithmetic expression
+            # Safe Offline Math Evaluation
             safe_expr = re.sub(r'[^0-9\+\-\*\/\(\)\.\^ ]', '', prompt)
             if safe_expr and any(c in safe_expr for c in "+-*/"):
                 try:
-                    result = eval(safe_expr.replace("^", "**"), {"__builtins__": None}, {})
-                    return f"Result: {result}"
+                    res = eval(safe_expr.replace("^", "**"), {"__builtins__": None}, {})
+                    return f"Result: {res}"
                 except Exception:
                     pass
 
-            return f"No exact match in local knowledge base. Type 'search {prompt}' to find answers online."
+            return f"No record found in offline database. Type 'search {prompt}' to look up online."
         except Exception as e:
-            return f"Knowledge Database Error: {e}"
+            return f"Database error: {e}"
 
-# Initialize DB on load
 KnowledgeDatabase.initialize_db()
 
 # ============================================================
@@ -808,7 +819,7 @@ class VirtualMouseManager:
         return "Virtual Mouse Pro safely closed."
 
 # ============================================================
-# BULLETPROOF BACKGROUND AUTO-UPDATER
+# PORTABLE AUTO-UPDATER
 # ============================================================
 class AutoUpdater(QThread):
     def run(self):
@@ -882,7 +893,7 @@ class AutoUpdater(QThread):
             pass
 
 # ============================================================
-# DB & AUDIT LOGGING
+# DB & AUDIT LOGGING (PORTABLE)
 # ============================================================
 def hash_pw(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
@@ -1163,7 +1174,7 @@ class SystemAutomation:
         return "Task complete."
 
 # ============================================================
-# EXCLUSIVE ADMIN SECTION (ADMIN WORKSPACE & COMMAND HUB)
+# EXCLUSIVE ADMIN WORKSPACE
 # ============================================================
 class AdminWorkspaceDialog(QDialog):
     def __init__(self, parent=None):
@@ -1257,12 +1268,12 @@ class AdminWorkspaceDialog(QDialog):
         layout.addWidget(QLabel("Administrative Diagnostic Output & Execution Log:"))
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
-        self.console_output.append("[SYSTEM] Admin Session Authenticated. SQLite Offline Engine Active.\n")
+        self.console_output.append("[SYSTEM] Portable Session Authenticated. SQLite Offline Engine Active.\n")
         layout.addWidget(self.console_output, 1)
 
         cmd_row = QHBoxLayout()
         self.admin_cmd_input = QLineEdit()
-        self.admin_cmd_input.setPlaceholderText("Enter query or command...")
+        self.admin_cmd_input.setPlaceholderText("Enter command or database query...")
         self.admin_cmd_input.returnPressed.connect(self.execute_admin_command)
         cmd_row.addWidget(self.admin_cmd_input, 1)
 
@@ -1382,7 +1393,17 @@ class TaskExecutionWorker(QThread):
                     self.task_completed.emit(f"Launching Roblox: {game_name.title()}!")
                     return
 
-        # PRIORITY 5: Open or Focus App
+        # PRIORITY 5: System Shortcuts
+        if p in ("lock pc", "lock screen", "lock computer"):
+            res = SystemAutomation.system_command("lock_pc")
+            self.task_completed.emit(res)
+            return
+        if p in ("mute", "unmute", "mute volume"):
+            res = SystemAutomation.system_command("mute_volume")
+            self.task_completed.emit(res)
+            return
+
+        # PRIORITY 6: Open or Focus App
         if re.search(r'^(?:open|launch|start|run|switch to)\s+(.+)', p):
             target = re.sub(r'^(?:open|launch|start|run|switch to)\s+', '', p).strip()
             if "." in target and not target.endswith(".exe") and " " not in target:
@@ -1393,7 +1414,7 @@ class TaskExecutionWorker(QThread):
                 self.task_completed.emit(res)
             return
 
-        # PRIORITY 6: Search Web / YouTube
+        # PRIORITY 7: Web / YouTube Search Fallback
         if re.search(r'^(?:search|lookup|google|find)\s+(.+)', p):
             query = re.sub(r'^(?:search|lookup|google|find)\s+', '', p).strip()
             if any(k in query for k in ["youtube", "yt"]):
@@ -1404,7 +1425,7 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 7: SQLite Local Knowledge Search (No Gemini)
+        # PRIORITY 8: SQLite Offline Knowledge Query
         ans = KnowledgeDatabase.query(self.prompt)
         self.task_completed.emit(ans)
 
@@ -1497,7 +1518,7 @@ class AdminPanelDialog(QDialog):
         self.populate_logs()
 
 # ============================================================
-# LOGIN & AUTH DIALOG
+# AUTHENTICATION DIALOG (PORTABLE USER STORE)
 # ============================================================
 class AuthDialog(QDialog):
     def __init__(self, pc_name: str, win_user: str):
@@ -1673,7 +1694,7 @@ class GeminiDesktopAssistant(QMainWindow):
         exit_btn.clicked.connect(self.clean_exit)
         self.top_bar.addWidget(exit_btn)
 
-        # Pure Pitch-Black Scroll Area & Viewport Styling
+        # Pure Black Chat Viewport
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1710,14 +1731,13 @@ class GeminiDesktopAssistant(QMainWindow):
         self.main_layout.addWidget(self.input_container)
 
         self.setCentralWidget(self.container)
-
         self.apply_mode_geometry()
 
         self.drag_pos = QPoint()
         self.updater = AutoUpdater()
         self.updater.start()
 
-        self.append_bubble("assistant", f"Online, {self.active_user}! Operating in 100% offline database mode.")
+        self.append_bubble("assistant", f"Welcome, {self.active_user}! SparkAssistant is running in portable offline mode.")
 
     def clean_exit(self):
         VirtualMouseManager.stop()
@@ -1799,7 +1819,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.append_bubble("assistant", result_text)
 
 # ============================================================
-# APPLICATION ENTRY POINT (FREEZE SUPPORTED)
+# APPLICATION BOOTSTRAP
 # ============================================================
 if __name__ == "__main__":
     mp.freeze_support()
@@ -1807,8 +1827,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     pc_name = os.environ.get("COMPUTERNAME", "Unknown-PC")
     win_user = os.environ.get("USERNAME", "Unknown-User")
-
-    enable_windows_startup()
 
     auth = AuthDialog(pc_name, win_user)
     if auth.exec() == QDialog.DialogCode.Accepted:
