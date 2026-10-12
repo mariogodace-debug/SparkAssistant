@@ -25,7 +25,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller PyQt6 google-genai python-pptx opencv-python mediapipe SpeechRecognition keyboard numpy
+          pip install pyinstaller PyQt6  python-pptx opencv-python mediapipe SpeechRecognition keyboard numpy
 
       - name: Compile Executable
         run: |

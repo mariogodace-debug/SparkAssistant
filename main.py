@@ -3,7 +3,6 @@ import sys
 import os
 
 # ----------------- FIX NOCONSOLE MULTIPROCESSING STREAMS -----------------
-# Prevents AttributeError: 'NoneType' object has no attribute 'write'
 if sys.stdout is None:
     sys.stdout = open(os.devnull, "w", encoding="utf-8")
 if sys.stderr is None:
@@ -12,7 +11,6 @@ if sys.stderr is None:
 import re
 import time
 import json
-import base64
 import random
 import hashlib
 import datetime
@@ -22,6 +20,7 @@ import urllib.parse
 import urllib.request
 import subprocess
 import webbrowser
+import sqlite3
 from pathlib import Path
 import ctypes
 from ctypes import wintypes
@@ -140,9 +139,6 @@ def bring_window_to_front(hwnd):
 APP_NAME = "SparkAssistant"
 GITHUB_REPO = "mariogodace-debug/SparkAssistant"
 
-API_KEY_B64 = "QVEuQWI4Uk42SlpPeWRqaVZDUmRLOHBTYS10S003S1VBN2FjRl9SN1F0OWdTQTZ6bnpxV2c="
-API_KEY = base64.b64decode(API_KEY_B64).decode("utf-8")
-
 ADMIN_USERNAME = "shadow"
 ADMIN_DEFAULT_PASS = "Mann@2041986"
 
@@ -150,6 +146,7 @@ MAX_LOG_ENTRIES = 1000
 BASE_DIR = Path.home() / "Desktop"
 LOG_FILE_PATH = BASE_DIR / "DeskAssistant_activity_log.txt"
 USER_DB_PATH = Path(__file__).resolve().parent / "users_db.json"
+KNOWLEDGE_DB_PATH = Path(__file__).resolve().parent / "knowledge.db"
 VERSION_STAMP_FILE = Path(tempfile.gettempdir()) / "spark_version.txt"
 
 ROBLOX_EXPERIENCES = {
@@ -182,6 +179,87 @@ def enable_windows_startup():
         pass
 
 # ============================================================
+# LOCAL KNOWLEDGE ENGINE (REPLACES GEMINI)
+# ============================================================
+class KnowledgeDatabase:
+    @classmethod
+    def initialize_db(cls):
+        conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                topic TEXT,
+                keywords TEXT,
+                response TEXT
+            )
+        """)
+        # Populate starter knowledge base if empty
+        cursor.execute("SELECT COUNT(*) FROM knowledge")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            starter_data = [
+                ("identity", "who are you what is your name sparkassistant spark", 
+                 "I am SparkAssistant, your local autonomous desktop companion and task automator."),
+                ("capabilities", "what can you do help features commands", 
+                 "I can control apps, run Roblox macros, launch Virtual Mouse Pro, create PowerPoint decks, search offline knowledge, and run system tasks."),
+                ("blox fruits", "blox fruits marine pirate fruits guide sea", 
+                 "Blox Fruits is an open-world anime RPG on Roblox. You can automate team selection by asking me 'marine' or 'pirate', or use 'start afk'."),
+                ("virtual mouse", "how does virtual mouse work touchless gestures hand control", 
+                 "Virtual Mouse uses computer vision: index finger moves the cursor, pinch thumb to click, pinky up to right click, and two fingers to scroll."),
+                ("math", "how to calculate math formulas equation", 
+                 "You can enter math equations directly into the search bar, like '25 * 40' or 'sqrt(144)'.")
+            ]
+            cursor.executemany("INSERT INTO knowledge (topic, keywords, response) VALUES (?, ?, ?)", starter_data)
+            conn.commit()
+        conn.close()
+
+    @classmethod
+    def query(cls, prompt: str) -> str:
+        prompt_clean = prompt.lower().strip()
+        words = re.findall(r'\b\w+\b', prompt_clean)
+        if not words:
+            return "Please enter a valid command or inquiry."
+
+        try:
+            conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
+            cursor = conn.cursor()
+            
+            # Simple keyword overlap query
+            cursor.execute("SELECT topic, keywords, response FROM knowledge")
+            rows = cursor.fetchall()
+            conn.close()
+
+            best_match = None
+            max_score = 0
+
+            for topic, keywords, response in rows:
+                kw_list = keywords.split()
+                score = sum(1 for w in words if w in kw_list)
+                if score > max_score:
+                    max_score = score
+                    best_match = response
+
+            if max_score > 0:
+                return best_match
+
+            # Try mathematical evaluation if prompt is an arithmetic expression
+            safe_expr = re.sub(r'[^0-9\+\-\*\/\(\)\.\^ ]', '', prompt)
+            if safe_expr and any(c in safe_expr for c in "+-*/"):
+                try:
+                    result = eval(safe_expr.replace("^", "**"), {"__builtins__": None}, {})
+                    return f"Result: {result}"
+                except Exception:
+                    pass
+
+            return f"No exact match in local knowledge base. Type 'search {prompt}' to find answers online."
+        except Exception as e:
+            return f"Knowledge Database Error: {e}"
+
+# Initialize DB on load
+KnowledgeDatabase.initialize_db()
+
+# ============================================================
 # SAFE CAMERA AND VISION ENGINE
 # ============================================================
 class CameraStream:
@@ -198,7 +276,6 @@ class CameraStream:
         if cv2 is None:
             raise RuntimeError("OpenCV not installed.")
         
-        # Test default webcam indices safely
         opened = False
         for idx in [self.preferred_index, 0, 1]:
             for backend in [cv2.CAP_DSHOW, cv2.CAP_ANY]:
@@ -512,7 +589,7 @@ def virtual_mouse_process_worker(shutdown_event, error_queue):
                 else:
                     mode = "none"
 
-                # 1. SCROLL
+                # SCROLL
                 if mode == "scroll":
                     gesture = "scroll"
                     draw_reticle(frame, points[8], (120, 230, 0))
@@ -533,7 +610,7 @@ def virtual_mouse_process_worker(shutdown_event, error_queue):
                     last_scroll_y = None
                     scroll_accumulator = 0.0
 
-                # 2. RIGHT CLICK
+                # RIGHT CLICK
                 if mode == "right_click":
                     gesture = "right click"
                     draw_reticle(frame, points[20], (255, 60, 200))
@@ -548,7 +625,7 @@ def virtual_mouse_process_worker(shutdown_event, error_queue):
                 else:
                     right_gesture_active = False
 
-                # 3. LEFT CLICK & DOUBLE CLICK
+                # LEFT CLICK
                 if mode == "left_click":
                     gesture = "left click"
                     draw_reticle(frame, points[4], (0, 180, 255))
@@ -569,7 +646,7 @@ def virtual_mouse_process_worker(shutdown_event, error_queue):
                     if thumb_released:
                         left_gesture_active = False
 
-                # 4. CURSOR NAVIGATION
+                # NAVIGATION
                 if mode == "navigation":
                     gesture = "move"
                     knuckle_pt = points[5]
@@ -699,7 +776,6 @@ class VirtualMouseManager:
         )
         cls._process.start()
 
-        # Check for immediate camera initialization failures
         time.sleep(0.6)
         if not cls._process.is_alive():
             err = "NO_CAMERA"
@@ -709,10 +785,10 @@ class VirtualMouseManager:
                 pass
             cls._process = None
             if err == "NO_CAMERA":
-                return "No operational webcam found on this PC. Please connect a camera to use Virtual Mouse Pro."
+                return "No operational webcam found on this PC."
             return "Failed to initialize camera or vision engine."
 
-        return "Virtual Mouse Pro started! Control your PC touch-free. Say 'stop virtual mouse' to close."
+        return "Virtual Mouse Pro started! Say 'stop virtual mouse' to close."
 
     @classmethod
     def stop(cls) -> str:
@@ -1012,7 +1088,7 @@ class SystemAutomation:
         clean = app_name.strip().lower()
 
         if not cls.is_safe_action(clean):
-            return "Action blocked: System control command denied by safety sandbox."
+            return "Action blocked by safety sandbox."
 
         hwnd = find_window_by_title_substring(clean)
         if hwnd:
@@ -1060,42 +1136,6 @@ class SystemAutomation:
                             pass
 
         return f"Could not find '{app_name}' installed locally."
-
-    @classmethod
-    def generate_presentation(cls, topic: str, slides_data: list) -> str:
-        try:
-            from pptx import Presentation
-            from pptx.util import Inches, Pt
-
-            prs = Presentation()
-            prs.slide_width = Inches(13.33)
-            prs.slide_height = Inches(7.5)
-
-            title_layout = prs.slide_layouts[0]
-            title_slide = prs.slides.add_slide(title_layout)
-            title_slide.shapes.title.text = topic.title()
-            title_slide.placeholders[1].text = "Generated autonomously by Spark Assistant"
-
-            bullet_layout = prs.slide_layouts[1]
-            for s in slides_data:
-                slide = prs.slides.add_slide(bullet_layout)
-                slide.shapes.title.text = s.get("title", "Overview")
-                body_shape = slide.placeholders[1]
-                tf = body_shape.text_frame
-                tf.clear()
-                for i, bullet in enumerate(s.get("points", [])):
-                    p = tf.add_paragraph() if i > 0 else tf.paragraphs[0]
-                    p.text = bullet
-                    p.font.size = Pt(20)
-
-            safe_name = re.sub(r'[\\/*?:"<>| ]', '_', topic)[:25]
-            out_path = Path.home() / "Desktop" / f"{safe_name}_Presentation.pptx"
-            prs.save(str(out_path))
-
-            os.startfile(str(out_path))
-            return f"Created presentation '{out_path.name}' on Desktop and opened it!"
-        except Exception as e:
-            return f"Failed to generate presentation: {e}"
 
     @classmethod
     def system_command(cls, action_type: str, detail: str = "") -> str:
@@ -1217,12 +1257,12 @@ class AdminWorkspaceDialog(QDialog):
         layout.addWidget(QLabel("Administrative Diagnostic Output & Execution Log:"))
         self.console_output = QTextEdit()
         self.console_output.setReadOnly(True)
-        self.console_output.append("[SYSTEM] Admin Session Authenticated. Elevated Workspace Operational.\n")
+        self.console_output.append("[SYSTEM] Admin Session Authenticated. SQLite Offline Engine Active.\n")
         layout.addWidget(self.console_output, 1)
 
         cmd_row = QHBoxLayout()
         self.admin_cmd_input = QLineEdit()
-        self.admin_cmd_input.setPlaceholderText("Enter administrative diagnostic or test query...")
+        self.admin_cmd_input.setPlaceholderText("Enter query or command...")
         self.admin_cmd_input.returnPressed.connect(self.execute_admin_command)
         cmd_row.addWidget(self.admin_cmd_input, 1)
 
@@ -1281,16 +1321,13 @@ class AdminWorkspaceDialog(QDialog):
         if query.lower() in ("clear", "cls"):
             self.console_output.clear()
             return
-        elif query.lower() == "ping":
-            self.console_output.append("[REPLY] Pong! All subroutines operational.")
-            return
 
         worker = TaskExecutionWorker(query)
         worker.task_completed.connect(lambda out: self.console_output.append(f"[RESULT] {out}\n"))
         worker.start()
 
 # ============================================================
-# INTENT DISPATCHER & GEMINI WORKER
+# INTENT DISPATCHER & OFFLINE KNOWLEDGE WORKER
 # ============================================================
 class TaskExecutionWorker(QThread):
     task_completed = pyqtSignal(str)
@@ -1367,51 +1404,9 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 7: Gemini Fallback with Sandboxed Directives
-        try:
-            from google import genai
-            from google.genai import types
-
-            client = genai.Client(api_key=API_KEY)
-            system_prompt = (
-                "You are an isolated private desktop assistant operating inside a strictly sandboxed user environment.\n"
-                "CRITICAL CONSTRAINTS:\n"
-                "1. You have ZERO administrator or root control over the user's PC.\n"
-                "2. You CANNOT execute shell commands, delete files, format drives, modify system settings, or install unauthorized software.\n"
-                "3. If asked to make a PowerPoint presentation, respond ONLY with JSON: {\"action\": \"create_ppt\", \"topic\": \"...\", \"slides\": [{\"title\": \"...\", \"points\": [\"...\", \"...\"]}]}\n"
-                "4. If asked to switch or open an allowed desktop application, output ONLY JSON: {\"action\": \"open_app\", \"parameter\": \"...\"}\n"
-                "5. For all other queries, answer directly, helpful, and concisely.\n"
-                "Return raw output with no markdown codeblocks for JSON."
-            )
-
-            res = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=self.prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.3,
-                    max_output_tokens=700
-                )
-            )
-
-            response_raw = (res.text or "").strip()
-            if response_raw.startswith("{") and response_raw.endswith("}"):
-                try:
-                    data = json.loads(response_raw)
-                    if data.get("action") == "create_ppt":
-                        out = SystemAutomation.generate_presentation(data.get("topic", "Presentation"), data.get("slides", []))
-                        self.task_completed.emit(out)
-                        return
-                    elif data.get("action") == "open_app":
-                        out = SystemAutomation.open_or_focus_app(data.get("parameter", ""))
-                        self.task_completed.emit(out)
-                        return
-                except Exception:
-                    pass
-
-            self.task_completed.emit(response_raw)
-        except Exception as e:
-            self.task_completed.emit(f"Could not complete task: {e}")
+        # PRIORITY 7: SQLite Local Knowledge Search (No Gemini)
+        ans = KnowledgeDatabase.query(self.prompt)
+        self.task_completed.emit(ans)
 
 # ============================================================
 # AUDIT LOG DIALOG
@@ -1697,7 +1692,7 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.setContentsMargins(12, 4, 8, 4)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Search, open apps, blox fruit side, afk, or ask...")
+        self.input_field.setPlaceholderText("Search offline knowledge, launch apps, blox fruit side, afk...")
         self.input_field.setFont(QFont("Segoe UI", 11))
         self.input_field.setStyleSheet("background: transparent; color: #ffffff; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
@@ -1722,7 +1717,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.updater = AutoUpdater()
         self.updater.start()
 
-        self.append_bubble("assistant", f"Online, {self.active_user}! Auto-updater active. Triple-click bar to expand/shrink.")
+        self.append_bubble("assistant", f"Online, {self.active_user}! Operating in 100% offline database mode.")
 
     def clean_exit(self):
         VirtualMouseManager.stop()
