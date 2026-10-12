@@ -12,6 +12,7 @@ import re
 import time
 import json
 import random
+import socket
 import hashlib
 import datetime
 import tempfile
@@ -24,7 +25,6 @@ import sqlite3
 from pathlib import Path
 import ctypes
 from ctypes import wintypes
-import winreg
 import math
 import multiprocessing as mp
 import queue
@@ -143,7 +143,7 @@ ADMIN_USERNAME = "shadow"
 ADMIN_DEFAULT_PASS = "Mann@2041986"
 MAX_LOG_ENTRIES = 1000
 
-# Portable base directory: saves everything on the pendrive next to the executable
+# Base directory points to the pendrive folder where the .exe runs
 if getattr(sys, 'frozen', False):
     PORTABLE_DIR = Path(sys.executable).resolve().parent
 else:
@@ -168,107 +168,208 @@ ROBLOX_EXPERIENCES = {
 }
 
 # ============================================================
-# EXPANDED OFFLINE SQLITE KNOWLEDGE ENGINE
+# AUTO-INITIALIZING SQLITE FTS5 DATABASE ENGINE
 # ============================================================
 class KnowledgeDatabase:
     @classmethod
+    def get_connection(cls):
+        conn = sqlite3.connect(str(KNOWLEDGE_DB_PATH))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @classmethod
     def initialize_db(cls):
-        conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS knowledge (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                topic TEXT,
-                keywords TEXT,
-                response TEXT
-            )
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_keywords ON knowledge(keywords)")
+        """Auto-creates and pre-populates knowledge.db directly on the pendrive if empty."""
+        try:
+            conn = cls.get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+                    title,
+                    content,
+                    category
+                );
+            """)
 
-        cursor.execute("SELECT COUNT(*) FROM knowledge")
-        count = cursor.fetchone()[0]
+            cursor.execute("SELECT count(*) FROM knowledge_fts")
+            count = cursor.fetchone()[0]
 
-        if count == 0:
-            starter_data = [
-                # System & Identity
-                ("identity", "who are you what is your name sparkassistant spark assistant", 
-                 "I am SparkAssistant, your local autonomous offline desktop intelligence and system companion."),
-                ("capabilities", "what can you do help features commands manual", 
-                 "I can control windows, launch Roblox, select teams, run safe AFK farming, execute touchless Virtual Mouse gestures, calculate math, and answer queries completely offline."),
-                
-                # Roblox Knowledge
-                ("blox fruits", "blox fruits marine pirate fruits guide sea devil fruit", 
-                 "Blox Fruits is a Roblox RPG. Type 'marine' or 'pirate' to auto-focus and join your crew, or type 'start afk' to enable anti-disconnect automation."),
-                ("devil fruits", "devil fruits blox fruit tier list best fruit light dough buddha leopard dragon", 
-                 "Buddha is best for leveling and grinding. Kitsune, Dough, and Leopard are top-tier for PvP."),
-                
-                # Virtual Mouse Controls
-                ("virtual mouse", "virtual mouse hand tracking gestures camera touchless control", 
-                 "Virtual Mouse Pro uses your camera: Index finger directs cursor, thumb tap clicks, pinky finger right-clicks, and two fingers scroll."),
-                
-                # Offline Tech & OS Shortcuts
-                ("task manager", "how to open task manager shortcut", 
-                 "Press Ctrl + Shift + Esc on your keyboard to instantly open Task Manager on Windows."),
-                ("screenshot", "how to take screenshot shortcut snipping tool", 
-                 "Press Win + Shift + S to launch the Windows Snipping Tool snippet selector."),
-                ("lock pc", "how to lock pc shortcut", 
-                 "Press Win + L or type 'lock pc' directly in SparkAssistant."),
-                ("ip address", "how to check ip address network command", 
-                 "Open Command Prompt and run 'ipconfig' to view your local IP and network adapters."),
-                
-                # General Science & Knowledge
-                ("water", "formula of water chemical composition", 
-                 "The chemical formula for water is H2O (two hydrogen atoms bonded to one oxygen atom)."),
-                ("speed of light", "speed of light physics c vacuum", 
-                 "The speed of light in a vacuum is approximately 299,792,458 meters per second (approx 300,000 km/s)."),
-                ("photosynthesis", "what is photosynthesis plants biology", 
-                 "Photosynthesis is the process by which green plants and organisms convert sunlight, water, and carbon dioxide into oxygen and chemical energy (glucose).")
-            ]
-            cursor.executemany("INSERT INTO knowledge (topic, keywords, response) VALUES (?, ?, ?)", starter_data)
-            conn.commit()
-        conn.close()
+            if count == 0:
+                starter_knowledge = [
+                    ("Identity", "SparkAssistant is an autonomous, portable desktop companion designed for Windows automation, macros, offline database lookups, and computer vision gesture control.", "System"),
+                    ("Features", "Features include: Win32 process focus, Blox Fruits anti-AFK automation, Marine/Pirate side picker, MediaPipe Virtual Mouse Pro, and local SQLite search.", "System"),
+                    ("Blox Fruits Overview", "Blox Fruits is an open-world adventure game on Roblox inspired by One Piece where players fight bandits, complete quests, and eat devil fruits to gain powers.", "Roblox"),
+                    ("Buddha Fruit", "The Buddha Fruit is considered the best grinding and raid fruit in Blox Fruits due to its massive hitbox, increased defense, and sword reach.", "Roblox"),
+                    ("Kitsune Fruit", "Kitsune is a mythical beast-type fruit featuring extreme agility, passive speed boosts, tails transformation, and devastating burn damage in PvP.", "Roblox"),
+                    ("Dough Fruit", "Dough Fruit allows awakening into V2 with massive stun combos and crowd control, popular in Bounty Hunting.", "Roblox"),
+                    ("Second Sea Requirements", "To reach Second Sea in Blox Fruits, reach level 700, talk to the Military Detective at Prison, and defeat the Ice Admiral at Frozen Village.", "Roblox"),
+                    ("Third Sea Requirements", "To reach Third Sea, reach level 1500, defeat Don Swan in the Colosseum, and defeat the rip_indra boss in the Green Zone mansion.", "Roblox"),
+                    ("Task Manager Shortcut", "Press Ctrl + Shift + Esc on Windows to immediately bring up Task Manager without passing through the lock screen.", "Windows"),
+                    ("Screen Capture Hotkey", "Press Win + Shift + S to launch the Windows Snipping Tool selector for rectangular, freeform, or window captures.", "Windows"),
+                    ("Clipboard History", "Press Win + V on Windows to open the multi-item clipboard history viewer.", "Windows"),
+                    ("Lock Computer", "Press Win + L to immediately lock your Windows user workstation.", "Windows"),
+                    ("Command Prompt IP Check", "Run 'ipconfig /all' in Command Prompt to see your local IPv4 address, default gateway, and active DNS servers.", "Windows"),
+                    ("Photosynthesis", "Photosynthesis is the chemical process through which plants use chlorophyll to turn sunlight, carbon dioxide, and water into glucose and oxygen.", "Science"),
+                    ("Speed of Light", "The speed of light in a vacuum (c) is precisely 299,792,458 meters per second (approx. 300,000 km/s).", "Physics"),
+                    ("Ohm's Law", "Ohm's law states that electric current (I) is directly proportional to voltage (V) and inversely proportional to resistance (R): V = I * R.", "Electronics"),
+                    ("Water Molecule", "Water is composed of two hydrogen atoms covalently bonded to one oxygen atom (H2O), with a bent polar molecular shape.", "Chemistry"),
+                    ("RAM", "RAM is high-speed volatile system memory used by the CPU to store actively running applications and temporary execution state.", "Hardware"),
+                    ("SSD vs HDD", "SSDs use flash NAND memory without moving parts for high transfer speeds, whereas mechanical HDDs rely on spinning magnetic platters.", "Hardware")
+                ]
+                cursor.executemany("INSERT INTO knowledge_fts (title, content, category) VALUES (?, ?, ?)", starter_knowledge)
+                conn.commit()
+
+            conn.close()
+        except Exception:
+            pass
 
     @classmethod
     def query(cls, prompt: str) -> str:
-        prompt_clean = prompt.lower().strip()
-        words = re.findall(r'\b\w+\b', prompt_clean)
-        if not words:
-            return "Please enter a valid command or inquiry."
+        prompt_clean = prompt.strip()
+        if not prompt_clean:
+            return ""
 
         try:
-            conn = sqlite3.connect(KNOWLEDGE_DB_PATH)
+            conn = cls.get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT topic, keywords, response FROM knowledge")
+
+            sanitized_query = re.sub(r'[^\w\s]', '', prompt_clean).strip()
+            if not sanitized_query:
+                conn.close()
+                return ""
+
+            tokens = [f'"{token}"*' for token in sanitized_query.split() if len(token) > 1]
+            fts_match_query = " OR ".join(tokens) if tokens else f'"{sanitized_query}"*'
+
+            cursor.execute("""
+                SELECT title, content, category, rank
+                FROM knowledge_fts
+                WHERE knowledge_fts MATCH ?
+                ORDER BY rank
+                LIMIT 2
+            """, (fts_match_query,))
+
             rows = cursor.fetchall()
             conn.close()
 
-            best_match = None
-            max_score = 0
-
-            for topic, keywords, response in rows:
-                kw_list = keywords.split()
-                score = sum(1 for w in words if w in kw_list)
-                if score > max_score:
-                    max_score = score
-                    best_match = response
-
-            if max_score > 0:
-                return best_match
-
-            # Safe Offline Math Evaluation
-            safe_expr = re.sub(r'[^0-9\+\-\*\/\(\)\.\^ ]', '', prompt)
-            if safe_expr and any(c in safe_expr for c in "+-*/"):
-                try:
-                    res = eval(safe_expr.replace("^", "**"), {"__builtins__": None}, {})
-                    return f"Result: {res}"
-                except Exception:
-                    pass
-
-            return f"No record found in offline database. Type 'search {prompt}' to look up online."
-        except Exception as e:
-            return f"Database error: {e}"
+            if rows:
+                results = []
+                for r in rows:
+                    results.append(f"📁 [{r['title']}] ({r['category']}):\n{r['content']}")
+                return "\n\n".join(results)
+        except Exception:
+            pass
+        return ""
 
 KnowledgeDatabase.initialize_db()
+
+# ============================================================
+# HYBRID INTELLIGENCE ENGINE (ONLINE + OFFLINE AUTO-ROUTING)
+# ============================================================
+class HybridAIEngine:
+    OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
+    OLLAMA_MODEL = "llama3.2:1b"
+
+    @classmethod
+    def is_connected_to_internet(cls) -> bool:
+        """Checks if internet is accessible via fast socket connect (0.4s timeout)."""
+        try:
+            socket.setdefaulttimeout(0.4)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect(("8.8.8.8", 53))
+            s.close()
+            return True
+        except Exception:
+            return False
+
+    @classmethod
+    def query_online_knowledge(cls, prompt: str) -> str:
+        """Free instant knowledge search via DuckDuckGo and Wikipedia (Zero API Keys)."""
+        clean_q = urllib.parse.quote_plus(prompt.strip())
+
+        # 1. DuckDuckGo Instant Answer
+        try:
+            url = f"https://api.duckduckgo.com/?q={clean_q}&format=json&no_html=1&skip_disambig=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "SparkAssistant/3.0"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+                if data.get("AbstractText"):
+                    return f"🌐 [Online DDG]\n{data['AbstractText']}"
+        except Exception:
+            pass
+
+        # 2. Wikipedia Summary
+        try:
+            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{clean_q}"
+            req = urllib.request.Request(wiki_url, headers={"User-Agent": "SparkAssistant/3.0"})
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode())
+                if data.get("extract"):
+                    return f"🌐 [Online Wiki]\n{data['extract']}"
+        except Exception:
+            pass
+
+        return ""
+
+    @classmethod
+    def query_offline_ollama(cls, prompt: str) -> str:
+        """Queries local Ollama Llama 3 if installed and running."""
+        try:
+            payload = {
+                "model": cls.OLLAMA_MODEL,
+                "prompt": (
+                    "You are SparkAssistant, an autonomous desktop companion. "
+                    "Provide a direct, concise, and helpful answer.\n\n"
+                    f"User: {prompt}\nAssistant:"
+                ),
+                "stream": False
+            }
+            req = urllib.request.Request(
+                cls.OLLAMA_URL,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                reply = data.get("response", "").strip()
+                if reply:
+                    return f"🔒 [Offline Llama]\n{reply}"
+        except Exception:
+            pass
+        return ""
+
+    @classmethod
+    def query(cls, prompt: str) -> str:
+        prompt_clean = prompt.strip()
+        if not prompt_clean:
+            return "Please enter a valid command or query."
+
+        # 1. Offline Math Calculator
+        safe_expr = re.sub(r'[^0-9\+\-\*\/\(\)\.\^ ]', '', prompt_clean)
+        if safe_expr and any(c in safe_expr for c in "+-*/"):
+            try:
+                res = eval(safe_expr.replace("^", "**"), {"__builtins__": None}, {})
+                return f"Math Result: {res}"
+            except Exception:
+                pass
+
+        # 2. If Internet is connected, use Online Knowledge Base
+        if cls.is_connected_to_internet():
+            online_ans = cls.query_online_knowledge(prompt_clean)
+            if online_ans:
+                return online_ans
+
+        # 3. Offline: Check Ollama Llama 3 first
+        ollama_ans = cls.query_offline_ollama(prompt_clean)
+        if ollama_ans:
+            return ollama_ans
+
+        # 4. Offline: Check local SQLite Knowledge Base on Pendrive
+        local_db_ans = KnowledgeDatabase.query(prompt_clean)
+        if local_db_ans:
+            return local_db_ans
+
+        return f"No record found. Type 'search {prompt_clean}' to search Google."
 
 # ============================================================
 # SAFE CAMERA AND VISION ENGINE
@@ -1338,7 +1439,7 @@ class AdminWorkspaceDialog(QDialog):
         worker.start()
 
 # ============================================================
-# INTENT DISPATCHER & OFFLINE KNOWLEDGE WORKER
+# INTENT DISPATCHER & KNOWLEDGE WORKER
 # ============================================================
 class TaskExecutionWorker(QThread):
     task_completed = pyqtSignal(str)
@@ -1425,8 +1526,8 @@ class TaskExecutionWorker(QThread):
             self.task_completed.emit(res)
             return
 
-        # PRIORITY 8: SQLite Offline Knowledge Query
-        ans = KnowledgeDatabase.query(self.prompt)
+        # PRIORITY 8: Hybrid Knowledge & Offline Engine
+        ans = HybridAIEngine.query(self.prompt)
         self.task_completed.emit(ans)
 
 # ============================================================
@@ -1694,7 +1795,7 @@ class GeminiDesktopAssistant(QMainWindow):
         exit_btn.clicked.connect(self.clean_exit)
         self.top_bar.addWidget(exit_btn)
 
-        # Pure Black Chat Viewport
+        # Pure Black Viewport
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -1713,7 +1814,7 @@ class GeminiDesktopAssistant(QMainWindow):
         input_layout.setContentsMargins(12, 4, 8, 4)
 
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("Search offline knowledge, launch apps, blox fruit side, afk...")
+        self.input_field.setPlaceholderText("Search knowledge, ask questions, apps, macros...")
         self.input_field.setFont(QFont("Segoe UI", 11))
         self.input_field.setStyleSheet("background: transparent; color: #ffffff; border: none;")
         self.input_field.returnPressed.connect(self.send_prompt)
@@ -1737,7 +1838,7 @@ class GeminiDesktopAssistant(QMainWindow):
         self.updater = AutoUpdater()
         self.updater.start()
 
-        self.append_bubble("assistant", f"Welcome, {self.active_user}! SparkAssistant is running in portable offline mode.")
+        self.append_bubble("assistant", f"Welcome, {self.active_user}! SparkAssistant is ready in portable hybrid mode.")
 
     def clean_exit(self):
         VirtualMouseManager.stop()
