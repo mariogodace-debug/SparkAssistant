@@ -1,4 +1,5 @@
-﻿# -*- coding: utf-8 -*-
+FORCED_OFFLINE = False
+# -*- coding: utf-8 -*-
 import sys
 import os
 
@@ -109,6 +110,15 @@ def send_alt_f4():
 
 def find_window_by_title_substring(substring: str):
     found_hwnd = None
+
+    def toggle_network_mode(self):
+        global FORCED_OFFLINE
+        FORCED_OFFLINE = not FORCED_OFFLINE
+        if hasattr(self, 'mode_btn'):
+            if FORCED_OFFLINE:
+                self.mode_btn.configure(text='🔒 Offline', fg_color='#551111', hover_color='#772222')
+            else:
+                self.mode_btn.configure(text='🌐 Online', fg_color='#115522', hover_color='#227733')
 
     def enum_windows_proc(hwnd, lParam):
         nonlocal found_hwnd
@@ -272,26 +282,29 @@ class HybridAIEngine:
 
     @classmethod
     def is_connected_to_internet(cls) -> bool:
-        """Checks if internet is accessible via fast socket connect (0.4s timeout)."""
-        try:
-            socket.setdefaulttimeout(0.4)
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect(("8.8.8.8", 53))
-            s.close()
-            return True
-        except Exception:
+        if FORCED_OFFLINE:
             return False
-
+        try:
+            with socket.create_connection(("1.1.1.1", 53), timeout=0.6):
+                return True
+        except Exception:
+            try:
+                with socket.create_connection(("8.8.8.8", 53), timeout=0.6):
+                    return True
+            except Exception:
+                return False
     @classmethod
     def query_online_knowledge(cls, prompt: str) -> str:
-        """Free instant knowledge search via DuckDuckGo and Wikipedia (Zero API Keys)."""
-        clean_q = urllib.parse.quote_plus(prompt.strip())
+        """Online instant answer via DuckDuckGo and Wikipedia."""
+        clean_prompt = prompt.strip()
+        cleaned_topic = re.sub(r'^(?:what is|who is|explain|tell me about|define)\s+', '', clean_prompt, flags=re.IGNORECASE).strip()
+        clean_q = urllib.parse.quote_plus(cleaned_topic if cleaned_topic else clean_prompt)
 
         # 1. DuckDuckGo Instant Answer
         try:
             url = f"https://api.duckduckgo.com/?q={clean_q}&format=json&no_html=1&skip_disambig=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "SparkAssistant/3.0"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) SparkAssistant/3.0"})
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
                 data = json.loads(resp.read().decode())
                 if data.get("AbstractText"):
                     return f"🌐 [Online DDG]\n{data['AbstractText']}"
@@ -300,9 +313,10 @@ class HybridAIEngine:
 
         # 2. Wikipedia Summary
         try:
-            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{clean_q}"
-            req = urllib.request.Request(wiki_url, headers={"User-Agent": "SparkAssistant/3.0"})
-            with urllib.request.urlopen(req, timeout=3) as resp:
+            wiki_slug = urllib.parse.quote(cleaned_topic.replace(" ", "_") if cleaned_topic else clean_prompt)
+            wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{wiki_slug}"
+            req = urllib.request.Request(wiki_url, headers={"User-Agent": "SparkAssistant/3.0 (contact: github.com/mariogodace-debug)"})
+            with urllib.request.urlopen(req, timeout=3.5) as resp:
                 data = json.loads(resp.read().decode())
                 if data.get("extract"):
                     return f"🌐 [Online Wiki]\n{data['extract']}"
@@ -313,13 +327,13 @@ class HybridAIEngine:
 
     @classmethod
     def query_offline_ollama(cls, prompt: str) -> str:
-        """Queries local Ollama Llama 3 if installed and running."""
+        """Direct, non-streaming query to local Ollama on port 11434 with 25s timeout."""
         try:
             payload = {
                 "model": cls.OLLAMA_MODEL,
                 "prompt": (
                     "You are SparkAssistant, an autonomous desktop companion. "
-                    "Provide a direct, concise, and helpful answer.\n\n"
+                    "Provide a direct, clear, and helpful answer.\n\n"
                     f"User: {prompt}\nAssistant:"
                 ),
                 "stream": False
@@ -329,7 +343,7 @@ class HybridAIEngine:
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 reply = data.get("response", "").strip()
                 if reply:
@@ -353,23 +367,23 @@ class HybridAIEngine:
             except Exception:
                 pass
 
-        # 2. If Internet is connected, use Online Knowledge Base
+        # 2. If online, check Online Knowledge Base first
         if cls.is_connected_to_internet():
             online_ans = cls.query_online_knowledge(prompt_clean)
             if online_ans:
                 return online_ans
 
-        # 3. Offline: Check Ollama Llama 3 first
+        # 3. Always prioritize local Ollama LLM next (Offline AI Engine)
         ollama_ans = cls.query_offline_ollama(prompt_clean)
         if ollama_ans:
             return ollama_ans
 
-        # 4. Offline: Check local SQLite Knowledge Base on Pendrive
+        # 4. Fallback: Local SQLite Quick Cards (only when Ollama is unavailable)
         local_db_ans = KnowledgeDatabase.query(prompt_clean)
         if local_db_ans:
             return local_db_ans
 
-        return f"No record found. Type 'search {prompt_clean}' to search Google."
+        return f"No response generated. Type 'search {prompt_clean}' to search Google."
 
 # ============================================================
 # SAFE CAMERA AND VISION ENGINE
@@ -1708,6 +1722,18 @@ class AuthDialog(QDialog):
 # DESKTOP SEARCH BAR & EXPANDED VIEW
 # ============================================================
 class GeminiDesktopAssistant(QMainWindow):
+    def toggle_network_mode(self):
+        global FORCED_OFFLINE
+        FORCED_OFFLINE = not FORCED_OFFLINE
+        if FORCED_OFFLINE:
+            self.mode_toggle_btn.setText("Offline")
+            self.mode_toggle_btn.setToolTip("Network Isolated: Ollama local only")
+            self.mode_toggle_btn.setStyleSheet("QPushButton { background: #551818; color: #ff9494; border-radius: 6px; border: 1px solid #852b2b; font-size: 11px; font-weight: bold; } QPushButton:hover { background: #732222; }")
+        else:
+            self.mode_toggle_btn.setText("Online")
+            self.mode_toggle_btn.setToolTip("Web Enabled: Online/Offline hybrid")
+            self.mode_toggle_btn.setStyleSheet("QPushButton { background: #143e22; color: #72f09d; border-radius: 6px; border: 1px solid #23693a; font-size: 11px; font-weight: bold; } QPushButton:hover { background: #1c5730; }")
+
     def __init__(self, active_user: str, is_admin: bool, pc_name: str, win_user: str):
         super().__init__()
         self.active_user = active_user
@@ -1744,6 +1770,12 @@ class GeminiDesktopAssistant(QMainWindow):
         self.title_lbl.setStyleSheet("color: #8ab4f8;")
         self.top_bar.addWidget(self.title_lbl)
         self.top_bar.addStretch()
+        self.mode_toggle_btn = QPushButton('Online')
+        self.mode_toggle_btn.setFixedSize(65, 22)
+        self.mode_toggle_btn.setToolTip('Toggle Network Isolation')
+        self.mode_toggle_btn.setStyleSheet('QPushButton { background: #143e22; color: #72f09d; border-radius: 6px; border: 1px solid #23693a; font-size: 11px; font-weight: bold; } QPushButton:hover { background: #1c5730; }')
+        self.mode_toggle_btn.clicked.connect(self.toggle_network_mode)
+        self.top_bar.addWidget(self.mode_toggle_btn)
 
         if self.is_admin:
             self.admin_hub_btn = QPushButton("⚡ Admin Hub")
