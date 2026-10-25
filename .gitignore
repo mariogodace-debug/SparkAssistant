@@ -1,0 +1,13 @@
+﻿# Large databases and model storage
+archives_zim/
+models/
+kiwix/
+*.zim
+*.bin
+*.blob
+*.exe
+library.xml
+
+# Python cache
+__pycache__/
+*.pyc
