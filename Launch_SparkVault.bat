@@ -37,6 +37,6 @@ if %errorlevel% neq 0 (
 
 :: Launch the Hybrid Assistant
 echo [3/3] Starting SparkVault Assistant...
-python "%VAULT_DIR%\fast_assistant.py"
+python "%VAULT_DIR%\main.py"
 
 pause

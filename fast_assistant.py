@@ -62,17 +62,31 @@ def search_online_duckduckgo(query):
     except Exception:
         return ""
 
-def query_llm(prompt, model="qwen2.5:3b", context="", source_type="Internal Weights"):
+def query_vault(prompt, model="qwen2.5:3b", stream=True):
+    """Core function callable from main.py or any external script."""
+    top_link, offline_text = search_offline_vault(prompt)
+    context = ""
+    source_label = "Internal Weights"
+
+    if offline_text:
+        context = offline_text
+        source_label = f"Local Offline Vault ({top_link})"
+    elif is_online():
+        web_text = search_online_duckduckgo(prompt)
+        if web_text:
+            context = web_text
+            source_label = "Live Web"
+
     full_prompt = (
-        f"Context from {source_type}:\n\"\"\"{context}\"\"\"\n\n"
-        f"Instruction: Use the context above to deliver an accurate, direct answer or essay.\n"
+        f"Context from {source_label}:\n\"\"\"{context}\"\"\"\n\n"
+        f"Instruction: Deliver an accurate, direct answer or solution.\n"
         f"User Prompt: {prompt}"
     ) if context else prompt
 
     payload = {
         "model": model,
         "prompt": full_prompt,
-        "stream": True,
+        "stream": stream,
         "options": {
             "num_predict": 750,
             "num_ctx": 2048,
@@ -81,14 +95,20 @@ def query_llm(prompt, model="qwen2.5:3b", context="", source_type="Internal Weig
     }
     
     try:
-        res = requests.post(OLLAMA_URL, json=payload, stream=True, timeout=None)
-        for line in res.iter_lines():
-            if line:
-                chunk = json.loads(line.decode('utf-8'))
-                print(chunk.get("response", ""), end="", flush=True)
-        print("\n")
+        res = requests.post(OLLAMA_URL, json=payload, stream=stream, timeout=None)
+        if stream:
+            for line in res.iter_lines():
+                if line:
+                    chunk = json.loads(line.decode('utf-8'))
+                    print(chunk.get("response", ""), end="", flush=True)
+            print("\n")
+            return source_label
+        else:
+            return res.json().get("response", "")
     except Exception as e:
-        print(f"\n[Error contacting Ollama]: {e}")
+        err_msg = f"[Ollama Error]: {e}"
+        print(err_msg)
+        return err_msg
 
 def main():
     online_status = is_online()
@@ -105,40 +125,16 @@ def main():
                 break
 
             if user_input.startswith("r1:"):
-                selected_model = "deepseek-r1:7b"
-                clean_query = user_input[3:].strip()
+                model = "deepseek-r1:7b"
+                q = user_input[3:].strip()
             elif user_input.startswith("code:"):
-                selected_model = "spark-coder:7b"
-                clean_query = user_input[5:].strip()
+                model = "spark-coder:7b"
+                q = user_input[5:].strip()
             else:
-                selected_model = "qwen2.5:3b"
-                clean_query = user_input
+                model = "qwen2.5:3b"
+                q = user_input
 
-            context = ""
-            source_label = ""
-
-            print("\n[1/2] Searching local vault...", end=" ")
-            top_link, offline_text = search_offline_vault(clean_query)
-
-            if offline_text:
-                print(f"Found offline article: {top_link}")
-                context = offline_text
-                source_label = "Local Offline Vault"
-            elif is_online():
-                print("No offline hit. Querying live web...", end=" ")
-                web_text = search_online_duckduckgo(clean_query)
-                if web_text:
-                    print("Found live web results.")
-                    context = web_text
-                    source_label = "Live Web"
-                else:
-                    print("Synthesizing from neural weights.")
-            else:
-                print("No direct text hit; synthesizing from local weights.")
-
-            print(f"[2/2] Streaming [{selected_model}]:\n")
-            query_llm(clean_query, model=selected_model, context=context, source_type=source_label)
-
+            query_vault(q, model=model, stream=True)
         except KeyboardInterrupt:
             break
 

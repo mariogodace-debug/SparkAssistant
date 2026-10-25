@@ -1988,3 +1988,47 @@ if __name__ == "__main__":
     else:
         sys.exit(0)
 
+
+# ==========================================
+# SPARKVAULT INTELLIGENCE INTEGRATION
+# ==========================================
+try:
+    from fast_assistant import query_vault, search_offline_vault, is_online
+    
+    def handle_vault_command(user_cmd):
+        """Processes AI and offline-database tasks inside SparkAssistant."""
+        cmd_lower = user_cmd.strip().lower()
+        
+        if cmd_lower.startswith("ask "):
+            prompt = user_cmd[4:].strip()
+            print("\n[SparkVault 3B Engine Querying...]")
+            query_vault(prompt, model="qwen2.5:3b", stream=True)
+            return True
+            
+        elif cmd_lower.startswith("code "):
+            prompt = user_cmd[5:].strip()
+            print("\n[SparkVault 7B Coder Generating...]")
+            query_vault(prompt, model="spark-coder:7b", stream=True)
+            return True
+            
+        elif cmd_lower.startswith("r1 "):
+            prompt = user_cmd[3:].strip()
+            print("\n[DeepSeek-R1 Logical Synthesis...]")
+            query_vault(prompt, model="deepseek-r1:7b", stream=True)
+            return True
+            
+        elif cmd_lower.startswith("vault-search "):
+            kw = user_cmd[13:].strip()
+            link, text = search_offline_vault(kw)
+            if link:
+                print(f"\n[Found in Database]: http://localhost:8088{link}")
+                print(f"[Excerpt]: {text[:300]}...\n")
+            else:
+                print("\n[No direct match found in 20 offline archives]\n")
+            return True
+            
+        return False
+        
+except ImportError:
+    def handle_vault_command(user_cmd):
+        return False
