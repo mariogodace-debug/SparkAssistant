@@ -2032,3 +2032,113 @@ try:
 except ImportError:
     def handle_vault_command(user_cmd):
         return False
+
+# ========================================================
+# SPARKASSISTANT NATIVE VAULT ENGINE (HYBRID RAG + OLLAMA)
+# ========================================================
+import socket
+import string
+import urllib.request
+import urllib.parse
+import json
+import re
+import requests
+from bs4 import BeautifulSoup
+
+VAULT_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OLLAMA_API = "http://localhost:11434/api/generate"
+KIWIX_API = "http://localhost:8088"
+STOP_WORDS = {"how", "do", "i", "a", "an", "the", "in", "on", "at", "to", "for", "of", "and", "or", "is", "can", "what", "why", "with", "write", "an", "essay"}
+
+def check_internet(timeout=1.0):
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("1.1.1.1", 53))
+        return True
+    except Exception:
+        return False
+
+def get_keywords(query):
+    words = re.findall(r'\b[a-zA-Z0-9_+#\.]+\b', query)
+    cleaned = [w for w in words if w.lower() not in STOP_WORDS]
+    return " ".join(cleaned[:5]) if cleaned else query
+
+def search_kiwix(query):
+    try:
+        url = f"{KIWIX_API}/search?pattern={urllib.parse.quote(get_keywords(query))}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=1.5) as res:
+            html = res.read().decode('utf-8', errors='ignore')
+        matches = re.findall(r'href="(/[^"]+/[^"]+)"', html)
+        clean = [m for m in matches if not any(x in m for x in ['.css', '.js', '.png', '.ico', '/skin/'])]
+        if clean:
+            top_link = clean[0]
+            art_req = urllib.request.Request(f"{KIWIX_API}{top_link}", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(art_req, timeout=1.5) as art_res:
+                soup = BeautifulSoup(art_res.read().decode('utf-8', errors='ignore'), "html.parser")
+                for tag in soup(["script", "style", "nav", "footer"]):
+                    tag.decompose()
+                return top_link, " ".join(soup.stripped_strings)[:1500]
+        return None, ""
+    except Exception:
+        return None, ""
+
+def search_duckduckgo(query):
+    try:
+        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(get_keywords(query))}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=2.0) as res:
+            soup = BeautifulSoup(res.read().decode('utf-8', errors='ignore'), "html.parser")
+            snippets = [s.get_text() for s in soup.find_all("a", class_="result__snippet")[:2]]
+            return " ".join(snippets)[:1200]
+    except Exception:
+        return ""
+
+def spark_generate(prompt, model="qwen2.5:3b"):
+    """Core function to query the local neural models with RAG context."""
+    link, context = search_kiwix(prompt)
+    source = f"136GB HDD Database ({link})" if context else ""
+    
+    if not context and check_internet():
+        context = search_duckduckgo(prompt)
+        if context:
+            source = "Live Web Search"
+            
+    full_prompt = (
+        f"Context from {source}:\n\"\"\"{context}\"\"\"\n\n"
+        f"Instruction: Use the context above to deliver an accurate, well-structured response.\n"
+        f"User Prompt: {prompt}"
+    ) if context else prompt
+
+    payload = {
+        "model": model,
+        "prompt": full_prompt,
+        "stream": True,
+        "options": {"num_predict": 750, "num_ctx": 2048, "temperature": 0.3}
+    }
+    try:
+        res = requests.post(OLLAMA_API, json=payload, stream=True, timeout=None)
+        for line in res.iter_lines():
+            if line:
+                chunk = json.loads(line.decode('utf-8'))
+                print(chunk.get("response", ""), end="", flush=True)
+        print("\n")
+    except Exception as e:
+        print(f"\n[Ollama Engine Error]: {e}\n")
+
+def process_sparkassistant_command(user_text):
+    """Router for SparkAssistant voice/text commands."""
+    cmd = user_text.strip()
+    cmd_lower = cmd.lower()
+    
+    if cmd_lower.startswith("ask "):
+        spark_generate(cmd[4:].strip(), model="qwen2.5:3b")
+        return True
+    elif cmd_lower.startswith("code "):
+        spark_generate(cmd[5:].strip(), model="spark-coder:7b")
+        return True
+    elif cmd_lower.startswith("r1 "):
+        spark_generate(cmd[3:].strip(), model="deepseek-r1:7b")
+        return True
+    return False
