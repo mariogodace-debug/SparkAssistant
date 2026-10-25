@@ -1,34 +1,42 @@
 @echo off
-title SparkVault Offline Intelligence
+setlocal enabledelayedexpansion
+title SparkVault Portable Hybrid Intelligence
 color 0b
 
-echo ========================================================
-echo  Checking SparkVault Services...
-echo ========================================================
+:: Auto-detect current drive and directory
+set "VAULT_DIR=%~dp0"
+if "%VAULT_DIR:~-1%"=="\" set "VAULT_DIR=%VAULT_DIR:~0,-1%"
 
-:: 1. Check if Kiwix is running on port 8088; if not, launch it
+echo [SparkVault] Mounted on: %VAULT_DIR%
+
+:: Session-only variables (does not touch host PC registry)
+set "OLLAMA_MODELS=%VAULT_DIR%\models"
+set "OLLAMA_KEEP_ALIVE=-1"
+set "OLLAMA_NUM_THREADS=4"
+set "PATH=%VAULT_DIR%\kiwix;%PATH%"
+
+:: Check / Start Kiwix Server on port 8088
 netstat -ano | findstr :8088 >nul
 if %errorlevel% neq 0 (
-    echo Starting Kiwix Database Server...
-    start /min "" "E:\SparkVault\kiwix\kiwix-serve.exe" --port=8088 --library "E:\SparkVault\kiwix\library.xml"
+    echo [1/3] Starting Portable Kiwix Server...
+    start "" /min "%VAULT_DIR%\kiwix\kiwix-serve.exe" --port=8088 --library "%VAULT_DIR%\kiwix\library.xml"
     timeout /t 2 /nobreak >nul
 ) else (
-    echo [OK] Kiwix Database Server is active.
+    echo [1/3] Kiwix Server active on port 8088.
 )
 
-:: 2. Ensure Ollama service is active
+:: Check / Start Ollama engine
 netstat -ano | findstr :11434 >nul
 if %errorlevel% neq 0 (
-    echo Starting Ollama Engine...
-    set OLLAMA_MODELS=E:\SparkVault\models
-    start /min "" ollama serve
+    echo [2/3] Starting Ollama Engine from Vault...
+    start "" /min ollama serve
     timeout /t 3 /nobreak >nul
 ) else (
-    echo [OK] Ollama Engine is active.
+    echo [2/3] Ollama Engine active.
 )
 
-:: 3. Launch the Assistant Interface
-echo [OK] Starting SparkVault Assistant...
-cls
-python "E:\SparkVault\fast_assistant.py"
+:: Launch the Hybrid Assistant
+echo [3/3] Starting SparkVault Assistant...
+python "%VAULT_DIR%\fast_assistant.py"
+
 pause
